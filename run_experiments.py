@@ -1,97 +1,90 @@
+import time
+import tracemalloc
+import numpy as np
+import pandas as pd
 import torch
 import torchvision
 import torchvision.transforms as transforms
-from torchvision.models import resnet18
-import matplotlib.pyplot as plt
-import numpy as np
-import cv2
+from torchvision.models import resnet18, ResNet18_Weights
 
-# ------------------ Load CIFAR-10 ------------------ #
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-])
+from greedy_search import Greedy_Search
+from ot_algo import OT_algorithm
+from iot_algo import IOT_algorithm
+from image_division import image_division
+from gradcam import gradcam   # file gradcam.py chứa hàm mình đã viết
 
-testset = torchvision.datasets.CIFAR10(root='./data', train=False,
-                                       download=True, transform=transform)
-testloader = torch.utils.data.DataLoader(testset, batch_size=1, shuffle=True)
+# ----------------- Benchmark helper ----------------- #
+def benchmark(func, *args, **kwargs):
+    tracemalloc.start()
+    start = time.time()
+    result = func(*args, **kwargs)
+    runtime = time.time() - start
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return result, runtime, peak / 1024  # KB
 
-# ------------------ Pretrained Model ------------------ #
-model = resnet18(pretrained=True)
-model.eval()
+# ----------------- Cost & Gain ----------------- #
+def cost_fn(region):
+    return region["mask"].sum()
 
-# ------------------ GradCAM ------------------ #
-def gradcam(model, img_tensor, target_layer="layer4"):
-    """
-    Grad-CAM cho 1 ảnh đầu vào.
-    img_tensor: Tensor có shape (1,3,H,W), chưa cần requires_grad.
-    target_layer: tên layer để lấy feature map.
-    """
-    features = {}
-    gradients = {}
+def gain_fn(region):
+    return (region["saliency"] * region["mask"]).sum()
 
-    def save_features(module, input, output):
-        features["value"] = output
+# ----------------- Main ----------------- #
+if __name__ == "__main__":
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
 
-    def save_gradients(module, grad_input, grad_output):
-        gradients["value"] = grad_output[0]
+    testset = torchvision.datasets.CIFAR10(root='./data', train=False,
+                                           download=True, transform=transform)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=1, shuffle=True)
 
-    # Gắn hook
-    for name, module in model.named_modules():
-        if name == target_layer:
-            module.register_forward_hook(save_features)
-            module.register_full_backward_hook(save_gradients)  # bản mới của PyTorch
+    # Model
+    weights = ResNet18_Weights.DEFAULT
+    model = resnet18(weights=weights)
+    model.eval()
 
-    # Đảm bảo input cần grad
-    img_tensor = img_tensor.clone().detach()
-    img_tensor.requires_grad_(True)
+    # Lấy 10 ảnh + saliency maps
+    images, saliency_maps = [], []
+    for img, label in testloader:
+        cam = gradcam(model, img)
+        images.append(img[0].permute(1,2,0).numpy())
+        saliency_maps.append(cam)
+        if len(images) >= 10:
+            break
 
-    # Forward
-    output = model(img_tensor)
-    pred_class = output.argmax().item()
+    budgets = [2000, 4000, 8000]   # pixel budget
+    epsilons = [0.1, 0.3]
+    results = []
 
-    # Backward
-    model.zero_grad()
-    class_score = output[0, pred_class]
-    class_score.backward()
+    for B in budgets:
+        # Greedy
+        (S_gs, g_gs), t_gs, mem_gs = benchmark(
+            Greedy_Search, images, saliency_maps, N=4, m=5, budget=B,
+            cost_fn=cost_fn, gain_fn=gain_fn
+        )
+        results.append(["Greedy", B, "-", len(S_gs), g_gs, t_gs, mem_gs])
 
-    # Lấy gradient và feature
-    grad = gradients["value"].detach().cpu().numpy()[0]
-    fmap = features["value"].detach().cpu().numpy()[0]
+        # OT
+        (S_ot, g_ot), t_ot, mem_ot = benchmark(
+            OT_algorithm, images, saliency_maps, N=4, m=5, budget=B,
+            cost_fn=cost_fn, gain_fn=gain_fn
+        )
+        results.append(["OT", B, "-", len(S_ot), g_ot, t_ot, mem_ot])
 
-    weights = grad.mean(axis=(1, 2))  # GAP trên gradient
-    cam = np.zeros(fmap.shape[1:], dtype=np.float32)
+        # IOT
+        for eps in epsilons:
+            (S_iot, g_iot), t_iot, mem_iot = benchmark(
+                IOT_algorithm, images, saliency_maps, N=4, m=5,
+                budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
+            )
+            results.append(["IOT", B, eps, len(S_iot), g_iot, t_iot, mem_iot])
 
-    for w, f in zip(weights, fmap):
-        cam += w * f
-
-    cam = np.maximum(cam, 0)  # ReLU
-    cam = cv2.resize(cam, (224, 224))
-    if cam.max() != 0:
-        cam = cam / cam.max()
-    return cam
-
-# ------------------ Demo 1 ảnh ------------------ #
-images, saliency_maps = [], []
-
-for img, label in testloader:
-    cam = gradcam(model, img)   # KHÔNG dùng no_grad()
-
-    images.append(img[0].permute(1,2,0).numpy())
-    saliency_maps.append(cam)
-
-    if len(images) >= 5:
-        break
-
-# ------------------ Visualization ------------------ #
-plt.figure(figsize=(10,4))
-for i in range(5):
-    plt.subplot(2,5,i+1)
-    plt.imshow(images[i])
-    plt.axis("off")
-
-    plt.subplot(2,5,5+i+1)
-    plt.imshow(images[i])
-    plt.imshow(saliency_maps[i], cmap="jet", alpha=0.5)
-    plt.axis("off")
-plt.show()
+    df = pd.DataFrame(results, columns=[
+        "Algorithm", "Budget", "Epsilon", "SetSize", "Gain", "Time(s)", "Memory(KB)"
+    ])
+    df.to_csv("experiment_results.csv", index=False)
+    print("✅ Saved results to experiment_results.csv")
+    print(df)
