@@ -1,3 +1,13 @@
+import time
+import tracemalloc
+import numpy as np
+import pandas as pd
+import cv2
+import torch
+import torchvision
+import torchvision.transforms as transforms
+from torchvision.models import resnet18, ResNet18_Weights
+
 def gradcam(model, img_tensor, target_layer="layer4"):
     """
     Grad-CAM cho 1 ảnh đầu vào.
