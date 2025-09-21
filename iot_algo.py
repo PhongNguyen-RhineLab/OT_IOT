@@ -4,57 +4,46 @@ from image_division import image_division
 
 def IOT_algorithm(images, saliency_maps, N, m, budget, eps, cost_fn, gain_fn):
     """
-    Improved Online Threshold (IOT) algorithm.
-
-    Args:
-        images: list các ảnh gốc
-        saliency_maps: list saliency maps
-        N: số patch chia theo mỗi chiều
-        m: số sub-region mỗi ảnh
-        budget: ngân sách B
-        eps: tham số epsilon (0 < eps < 1)
-        cost_fn: hàm chi phí c(I^M)
-        gain_fn: hàm lợi ích g(I^M)
-
-    Returns:
-        S_star: tập sub-region chọn
+    Improved Online Threshold (IOT) algorithm (Algorithm 3).
+    Trả về (S*, g(S*)).
     """
-    # Khởi tạo
-    V, S_T, S_prime, S_star = [], [], [], []
+    S_star = []
     eps_prime = eps / 5
 
-    # Gọi OT để lấy giá trị tham chiếu (Sb, M)
-    Sb, M = OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
+    # Gọi OT để lấy Sb và g(Sb)
+    Sb, g_Sb = OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
 
-    # Tập ngưỡng τ
+    # Sinh tập ngưỡng T theo paper
     T = []
     i = 0
     while True:
-        tau = (1 - eps_prime) ** i
-        tau *= (M * eps_prime) / (2 * budget)
-        if tau < (M * 4) / (eps_prime * budget):
+        tau = (1 - eps_prime) ** i * (g_Sb * eps_prime) / (2 * budget)
+        if tau >= (1 - eps_prime) * g_Sb / (2 * budget) and tau <= (4 * g_Sb) / (eps_prime * budget):
             T.append(tau)
             i += 1
         else:
             break
 
-    # Stream 2: xử lý ảnh mới đến
+    # mỗi τ có một tập X_tau
+    X_dict = {tau: [] for tau in T}
+
+    # Stream 2: xử lý ảnh
     for I, A in zip(images, saliency_maps):
-        # chia ảnh thành sub-regions bằng ID
         V = image_division([I], [A], N, m)
 
-        for I_M in V:  # mỗi sub-region chưa xét
+        for I_M in V:  # mỗi sub-region
             for tau in T:
-                # tìm tập con tốt nhất hiện tại
-                X_tau = max([S_T, S_prime], key=lambda X: sum(gain_fn(x) for x in X))
+                X_tau = X_dict[tau]
 
                 # kiểm tra điều kiện thêm I_M
-                if (gain_fn(I_M) / cost_fn(I_M)) >= tau and (sum(cost_fn(x) for x in X_tau) + cost_fn(I_M)) <= budget:
-                    X_tau = X_tau + [I_M]
+                current_cost = sum(cost_fn(x) for x in X_tau)
+                if (gain_fn(I_M) / cost_fn(I_M)) >= tau and current_cost + cost_fn(I_M) <= budget:
+                    X_dict[tau] = X_tau + [I_M]
 
-                # cập nhật S*
-                S_star = max([S_star, X_tau], key=lambda X: sum(gain_fn(x) for x in X))
+                # cập nhật S_star
+                if sum(gain_fn(x) for x in X_dict[tau]) > sum(gain_fn(x) for x in S_star):
+                    S_star = X_dict[tau]
 
-    # cuối cùng chọn tập tốt nhất giữa Sb và S*
+    # cuối cùng chọn tốt nhất giữa Sb và S_star
     final_set = max([Sb, S_star], key=lambda X: sum(gain_fn(x) for x in X))
-    return final_set
+    return final_set, sum(gain_fn(x) for x in final_set)
