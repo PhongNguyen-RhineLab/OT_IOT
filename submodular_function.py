@@ -50,7 +50,8 @@ class SubmodularFunction:
         features = []
         for region in regions:
             masked_img = self.apply_mask(region['image'], region['mask'])
-            feature = self.feature_extractor(masked_img.unsqueeze(0)).cpu().numpy()
+            with torch.no_grad():
+                feature = self.feature_extractor(masked_img.unsqueeze(0)).detach().cpu().numpy()
             features.append(feature.flatten())
 
         total_eff = 0
@@ -82,7 +83,8 @@ class SubmodularFunction:
 
         # Apply combined mask
         masked_img = self.apply_mask(regions[0]['image'], combined_mask)
-        combined_feature = self.feature_extractor(masked_img.unsqueeze(0)).cpu().numpy()
+        with torch.no_grad():
+            combined_feature = self.feature_extractor(masked_img.unsqueeze(0)).detach().cpu().numpy()
 
         # Cosine similarity
         similarity = cosine_similarity(
@@ -109,7 +111,8 @@ class SubmodularFunction:
         complement_mask = 1 - combined_mask
         complement_img = self.apply_mask(original_image, complement_mask)
 
-        complement_feature = self.feature_extractor(complement_img.unsqueeze(0)).cpu().numpy()
+        with torch.no_grad():
+            complement_feature = self.feature_extractor(complement_img.unsqueeze(0)).detach().cpu().numpy()
 
         # Cosine similarity
         similarity = cosine_similarity(
@@ -178,7 +181,8 @@ def create_gain_function(model, feature_extractor, original_images, **kwargs):
         if regions:
             img_id = int(regions[0]['id'].split('_')[0])
             original_img = torch.from_numpy(original_images[img_id]).float().permute(2, 0, 1)
-            target_feature = feature_extractor(original_img.unsqueeze(0)).cpu().numpy()
+            with torch.no_grad():
+                target_feature = feature_extractor(original_img.unsqueeze(0)).detach().cpu().numpy()
 
             return submod_func(regions, original_img, target_feature)
 
