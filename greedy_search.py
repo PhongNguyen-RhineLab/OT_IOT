@@ -25,4 +25,3 @@ def Greedy_Search(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
         total_cost += cost_fn(best_region)
 
     return S, sum(gain_fn(x) for x in S)
-

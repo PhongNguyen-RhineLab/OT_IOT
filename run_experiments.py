@@ -16,6 +16,8 @@ from greedy_search import Greedy_Search
 from ot_algo import OT_algorithm
 from iot_algo import IOT_algorithm
 from gradcam import gradcam
+from submodular_function import create_gain_function  # NEW IMPORT
+
 
 # ----------------- Benchmark helper ----------------- #
 def benchmark(func, *args, **kwargs):
@@ -27,12 +29,16 @@ def benchmark(func, *args, **kwargs):
     tracemalloc.stop()
     return result, runtime, peak / 1024  # KB
 
+
 # ----------------- Cost & Gain ----------------- #
 def cost_fn(region):
     return region["mask"].sum()
 
-def gain_fn(region):
+
+# OLD simple gain function - keep as backup
+def simple_gain_fn(region):
     return (region["saliency"] * region["mask"]).sum()
+
 
 def build_base_transform(weights):
     # Robust extraction of mean/std
@@ -45,6 +51,7 @@ def build_base_transform(weights):
     except Exception:
         pass
     return mean, std
+
 
 # ----------------- Dataset loader ----------------- #
 def load_dataset(name: str, weights, root: str, num_samples: int):
@@ -72,10 +79,8 @@ def load_dataset(name: str, weights, root: str, num_samples: int):
     elif name == "imagenet":
         if not root:
             raise ValueError("Provide --data-root pointing to ImageNet split directory.")
-        # Try native weights transform if available (safer augment order)
         try:
             tf = weights.transforms()
-            # If returned object lacks .transforms, just fall back
             if not hasattr(tf, "__call__"):
                 raise RuntimeError
             ds = ImageFolder(root=root, transform=tf)
@@ -94,6 +99,7 @@ def load_dataset(name: str, weights, root: str, num_samples: int):
             break
     return images, saliency_maps
 
+
 # ----------------- Main ----------------- #
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -105,6 +111,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument("--budgets", type=int, nargs="+", default=[2000, 4000, 8000])
     parser.add_argument("--epsilons", type=float, nargs="+", default=[0.1, 0.3])
+    parser.add_argument("--use-submodular", action="store_true",
+                        help="Use full submodular function instead of simple saliency")
     args = parser.parse_args()
 
     weights = ResNet18_Weights.DEFAULT
@@ -115,19 +123,43 @@ if __name__ == "__main__":
         args.dataset, weights, args.data_root, args.num_samples
     )
 
+    # Choose gain function
+    if args.use_submodular:
+        print("Using full submodular function (4 components)")
+        # Create feature extractor (use model without final classification layer)
+        feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
+        feature_extractor.eval()
+
+        gain_fn = create_gain_function(
+            model=model,
+            feature_extractor=feature_extractor,
+            original_images=images,
+            lambda1=1.0,  # confidence weight
+            lambda2=1.0,  # effectiveness weight
+            lambda3=1.0,  # consistency weight
+            lambda4=1.0  # collaboration weight
+        )
+    else:
+        print("Using simple saliency-based gain function")
+        gain_fn = simple_gain_fn
+
     results = []
     for B in args.budgets:
+        print(f"\n=== Budget: {B} ===")
+
         (S_gs, g_gs), t_gs, mem_gs = benchmark(
             Greedy_Search, images, saliency_maps, N=4, m=5,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
         results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs, mem_gs])
+        print(f"Greedy: |S|={len(S_gs)}, g(S)={g_gs:.3f}, time={t_gs:.3f}s")
 
         (S_ot, g_ot), t_ot, mem_ot = benchmark(
             OT_algorithm, images, saliency_maps, N=4, m=5,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
         results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot, mem_ot])
+        print(f"OT: |S|={len(S_ot)}, g(S)={g_ot:.3f}, time={t_ot:.3f}s")
 
         for eps in args.epsilons:
             (S_iot, g_iot), t_iot, mem_iot = benchmark(
@@ -135,11 +167,14 @@ if __name__ == "__main__":
                 budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
             )
             results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot, mem_iot])
+            print(f"IOT (ε={eps}): |S|={len(S_iot)}, g(S)={g_iot:.3f}, time={t_iot:.3f}s")
 
     df = pd.DataFrame(results, columns=[
         "Algorithm", "Dataset", "Budget", "Epsilon", "SetSize", "Gain", "Time(s)", "Memory(KB)"
     ])
-    out_file = "experiment_results.csv"
+
+    suffix = "_submodular" if args.use_submodular else "_simple"
+    out_file = f"experiment_results{suffix}.csv"
     df.to_csv(out_file, index=False)
-    print(f"Saved results to {out_file}")
+    print(f"\nSaved results to {out_file}")
     print(df)

@@ -5,13 +5,13 @@ def image_division(images, saliency_maps, N, m):
     Chia ảnh thành N×N patch, chọn m patch quan trọng nhất theo saliency.
 
     Args:
-        images: list ảnh gốc (H,W,C) (không dùng trực tiếp, chỉ để giữ index)
+        images: list ảnh gốc (H,W,C)
         saliency_maps: list saliency map (H,W)
         N: số patch mỗi chiều
         m: số patch được chọn trên mỗi ảnh
 
     Returns:
-        subregions: list dict chứa mask và saliency
+        subregions: list dict chứa mask, saliency và image reference
     """
     subregions = []
     for idx, (I, A) in enumerate(zip(images, saliency_maps)):
@@ -31,6 +31,7 @@ def image_division(images, saliency_maps, N, m):
                     "id": f"{idx}_{i}_{j}",
                     "mask": mask,
                     "saliency": A,
+                    "image": I,  # ADD: Original image reference for submodular function
                     "gain_val": sal_val
                 })
 
