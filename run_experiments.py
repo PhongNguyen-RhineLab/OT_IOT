@@ -1,4 +1,3 @@
-python
 import argparse
 import time
 import tracemalloc
@@ -35,41 +34,53 @@ def cost_fn(region):
 def gain_fn(region):
     return (region["saliency"] * region["mask"]).sum()
 
+def build_base_transform(weights):
+    # Robust extraction of mean/std
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+    try:
+        meta = getattr(weights, "meta", {})
+        mean = meta.get("mean", mean)
+        std = meta.get("std", std)
+    except Exception:
+        pass
+    return mean, std
+
 # ----------------- Dataset loader ----------------- #
 def load_dataset(name: str, weights, root: str, num_samples: int):
-    base_tf = weights.transforms()
-    # base_tf = Resize(232) -> CenterCrop(224) -> ToTensor() -> Normalize(...)
-    # We standardize: Resize(224,224) for simplicity (keeps saliency alignment)
-    common_norm = transforms.Normalize(mean=base_tf.transforms[-1].mean,
-                                       std=base_tf.transforms[-1].std)
+    mean, std = build_base_transform(weights)
 
-    def rgb_pad_pipeline(extra=None):
+    def pipeline(extra=None):
         ops = [transforms.Resize((224, 224))]
         if extra:
             ops.extend(extra)
-        ops += [transforms.ToTensor(), common_norm]
+        ops += [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
         return transforms.Compose(ops)
 
     if name == "cifar10":
-        ds = CIFAR10(root=root, train=False, download=True,
-                     transform=rgb_pad_pipeline())
+        ds = CIFAR10(root=root, train=False, download=True, transform=pipeline())
     elif name == "cifar100":
-        ds = CIFAR100(root=root, train=False, download=True,
-                      transform=rgb_pad_pipeline())
+        ds = CIFAR100(root=root, train=False, download=True, transform=pipeline())
     elif name == "stl10":
-        ds = STL10(root=root, split="test", download=True,
-                   transform=rgb_pad_pipeline())
+        ds = STL10(root=root, split="test", download=True, transform=pipeline())
     elif name == "mnist":
         ds = MNIST(root=root, train=False, download=True,
-                   transform=rgb_pad_pipeline([transforms.Grayscale(num_output_channels=3)]))
+                   transform=pipeline([transforms.Grayscale(num_output_channels=3)]))
     elif name == "fashionmnist":
         ds = FashionMNIST(root=root, train=False, download=True,
-                          transform=rgb_pad_pipeline([transforms.Grayscale(num_output_channels=3)]))
+                          transform=pipeline([transforms.Grayscale(num_output_channels=3)]))
     elif name == "imagenet":
-        # User must supply prepared folder (e.g. `imagenet/val`)
         if not root:
             raise ValueError("Provide --data-root pointing to ImageNet split directory.")
-        ds = ImageFolder(root=root, transform=base_tf)
+        # Try native weights transform if available (safer augment order)
+        try:
+            tf = weights.transforms()
+            # If returned object lacks .transforms, just fall back
+            if not hasattr(tf, "__call__"):
+                raise RuntimeError
+            ds = ImageFolder(root=root, transform=tf)
+        except Exception:
+            ds = ImageFolder(root=root, transform=pipeline())
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 
