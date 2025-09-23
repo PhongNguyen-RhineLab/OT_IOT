@@ -10,18 +10,16 @@ def marginal_gain(element, current_set, gain_fn):
     return gain_with - gain_without
 
 
-def IOT_algorithm_optimized(images, saliency_maps, N, m, budget, eps, cost_fn, gain_fn):
+def IOT_algorithm(images, saliency_maps, N, m, budget, eps, cost_fn, gain_fn):
     """
-    Optimized IOT algorithm with:
-    1. Reduced threshold set size
-    2. Early termination
-    3. Cached computations
+    Optimized IOT algorithm with memory tracking.
+    Returns: ((solution_set, gain), memory_aux_data)
     """
     print(f"IOT: Starting with ε={eps}")
 
     # Line 3: First pass with OT
-    Sb, M = OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
-    M = gain_fn(Sb) if Sb else 1  # Avoid division by zero
+    (Sb, M), ot_memory = OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
+    M = M if M > 0 else 1  # Avoid division by zero
     print(f"IOT: OT baseline gain = {M}")
 
     # Line 2: Set epsilon prime
@@ -62,11 +60,15 @@ def IOT_algorithm_optimized(images, saliency_maps, N, m, budget, eps, cost_fn, g
     # Cache for expensive computations
     gain_cache = {}
 
-    def cached_gain(regions_tuple):
-        if regions_tuple not in gain_cache:
-            regions_list = list(regions_tuple) if regions_tuple else []
-            gain_cache[regions_tuple] = gain_fn(regions_list)
-        return gain_cache[regions_tuple]
+    def cached_gain(regions_list):
+        """Cache gain function calls using region IDs as key"""
+        if not regions_list:
+            return 0
+        # Create hashable key from region IDs
+        key = tuple(sorted([r['id'] for r in regions_list]))
+        if key not in gain_cache:
+            gain_cache[key] = gain_fn(regions_list)
+        return gain_cache[key]
 
     processed = 0
     for I_M in V:
@@ -84,14 +86,11 @@ def IOT_algorithm_optimized(images, saliency_maps, N, m, budget, eps, cost_fn, g
                 continue
 
             # Choose candidate with higher marginal gain (using cache)
-            S_tau_tuple = tuple(f"{r['id']}" for r in S_tau)
-            S_prime_tau_tuple = tuple(f"{r['id']}" for r in S_prime_tau)
-
             gain_S_tau = 0 if not S_tau else (
-                    cached_gain(S_tau_tuple + (I_M['id'],)) - cached_gain(S_tau_tuple)
+                    cached_gain(S_tau + [I_M]) - cached_gain(S_tau)
             )
             gain_S_prime_tau = 0 if not S_prime_tau else (
-                    cached_gain(S_prime_tau_tuple + (I_M['id'],)) - cached_gain(S_prime_tau_tuple)
+                    cached_gain(S_prime_tau + [I_M]) - cached_gain(S_prime_tau)
             )
 
             if gain_S_tau >= gain_S_prime_tau:
@@ -116,9 +115,16 @@ def IOT_algorithm_optimized(images, saliency_maps, N, m, budget, eps, cost_fn, g
     # Line 13: Find best solution among all candidates
     all_candidates = [Sb]  # Include first pass solution
 
+    # Track sizes for memory calculation
+    max_S_tau_size = 0
+    max_S_prime_tau_size = 0
+
     for tau in T:
         S_tau = candidates[tau]['S_tau']
         S_prime_tau = candidates[tau]['S_prime_tau']
+
+        max_S_tau_size = max(max_S_tau_size, len(S_tau))
+        max_S_prime_tau_size = max(max_S_prime_tau_size, len(S_prime_tau))
 
         if sum(cost_fn(x) for x in S_tau) <= budget:
             all_candidates.append(S_tau)
@@ -127,15 +133,24 @@ def IOT_algorithm_optimized(images, saliency_maps, N, m, budget, eps, cost_fn, g
 
     # Line 14: Return best solution
     if not all_candidates:
-        return [], 0
+        memory_aux = {}
+        return ([], 0), memory_aux
 
     print("IOT: Evaluating final candidates...")
-    S_star = max(all_candidates, key=lambda X: gain_fn(X) if X else 0)
-    final_gain = gain_fn(S_star) if S_star else 0
+    S_star = max(all_candidates, key=lambda X: cached_gain(X) if X else 0)
+    final_gain = cached_gain(S_star) if S_star else 0
 
     print(f"IOT: Completed. Final gain = {final_gain}, |S*| = {len(S_star)}")
-    return S_star, final_gain
 
+    # Memory aux data for IOT:
+    # M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub) + |max of S_tau + max of S'_tau + S_b| * sizeof(1 sub)
+    memory_aux = {
+        'S_size': ot_memory.get('S_size', 0),
+        'S_prime_size': ot_memory.get('S_prime_size', 0),
+        'has_I_star': ot_memory.get('has_I_star', False),
+        'max_S_tau_size': max_S_tau_size,
+        'max_S_prime_tau_size': max_S_prime_tau_size,
+        'S_b_size': len(Sb)
+    }
 
-# Alias for backward compatibility
-IOT_algorithm = IOT_algorithm_optimized
+    return (S_star, final_gain), memory_aux

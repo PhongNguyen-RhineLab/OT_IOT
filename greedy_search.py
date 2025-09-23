@@ -1,9 +1,11 @@
 import numpy as np
 from image_division import image_division
 
+
 def Greedy_Search(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     """
-    Greedy Selection algorithm.
+    Greedy Selection algorithm with memory tracking.
+    Returns: ((solution_set, gain), memory_aux_data)
     """
     V = image_division(images, saliency_maps, N, m)
     S = []
@@ -24,4 +26,9 @@ def Greedy_Search(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
         S.append(best_region)
         total_cost += cost_fn(best_region)
 
-    return S, sum(gain_fn(x) for x in S)
+    total_gain = sum(gain_fn(x) for x in S)
+
+    # Memory aux data for Greedy (no additional structures needed)
+    memory_aux = {}
+
+    return (S, total_gain), memory_aux

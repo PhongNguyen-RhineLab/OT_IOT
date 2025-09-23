@@ -14,7 +14,7 @@ def marginal_gain(element, current_set, gain_fn):
 def OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     """
     Optimized Online Threshold (OT) algorithm.
-    Follows Algorithm 2 but with optimizations for speed.
+    Returns: ((solution_set, gain), memory_aux_data)
     """
     print("OT: Starting algorithm")
     V = image_division(images, saliency_maps, N, m)
@@ -117,7 +117,15 @@ def OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
         S_star, g_star = max(candidates, key=lambda x: x[1])
 
     print(f"OT: Completed. Final gain = {g_star}, |S*| = {len(S_star)}")
-    return S_star, g_star
+
+    # Memory aux data for OT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
+    memory_aux = {
+        'S_size': len(S),
+        'S_prime_size': len(S_prime),
+        'has_I_star': I_star is not None
+    }
+
+    return (S_star, g_star), memory_aux
 
 
 def get_feasible_prefix(S, budget, cost_fn):
