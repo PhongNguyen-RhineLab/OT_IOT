@@ -179,11 +179,15 @@ def load_dataset(name: str, weights, root: str, num_samples: int):
         raise ValueError(f"Unsupported dataset: {name}")
 
     loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True)
-    images, saliency_maps = [], []
+    images, saliency_maps = load_dataset(
+        args.dataset, weights, args.data_root, args.num_samples, device
+    )
     for img, _ in loader:
+        if device:
+            img = img.to(device)  # Chuyển input lên GPU
         cam = gradcam(model, img)
-        images.append(img[0].permute(1, 2, 0).numpy())
-        saliency_maps.append(cam)
+        images.append(img[0].cpu().permute(1, 2, 0).numpy())  # Chuyển về CPU để lưu
+        saliency_maps.append(cam.cpu() if isinstance(cam, torch.Tensor) else cam)
         if len(images) >= num_samples:
             break
     return images, saliency_maps
@@ -205,8 +209,12 @@ if __name__ == "__main__":
     parser.add_argument("--m", type=int, default=5, help="Number of subregions per image")
     args = parser.parse_args()
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     weights = ResNet18_Weights.DEFAULT
     model = resnet18(weights=weights)
+    model = model.to(device)  # Chuyển model lên GPU
     model.eval()
 
     images, saliency_maps = load_dataset(
@@ -217,6 +225,7 @@ if __name__ == "__main__":
     if args.use_submodular:
         print("Using full submodular function (4 components)")
         feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
+        feature_extractor = feature_extractor.to(device)  # Chuyển lên GPU
         feature_extractor.eval()
 
         gain_fn = create_gain_function(
