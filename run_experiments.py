@@ -186,8 +186,9 @@ def load_dataset(name: str, weights, root: str, num_samples: int, device=None, m
             img = img.to(device)  # Chuyển input lên GPU
         cam = gradcam(model, img)
 
-        # Lưu image dưới dạng tensor trên cùng device với model để tương thích
-        images.append(img[0])  # Giữ nguyên tensor trên GPU/CPU
+        # Lưu image dưới dạng numpy array với format (H,W,C) cho image_division
+        img_np = img[0].cpu().permute(1, 2, 0).numpy()  # (C,H,W) -> (H,W,C)
+        images.append(img_np)
 
         # Chuyển cam về CPU để lưu
         if isinstance(cam, torch.Tensor):

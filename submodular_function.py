@@ -194,24 +194,18 @@ def create_gain_function(model, feature_extractor, original_images, **kwargs):
 
                 img_id = int(regions[0]['id'].split('_')[0])
 
-                # original_images[img_id] is now a tensor on GPU/CPU
-                original_img = original_images[img_id]
+                # original_images[img_id] is now a numpy array (H,W,C)
+                original_img_np = original_images[img_id]
 
-                # Ensure tensor is on correct device
-                if isinstance(original_img, torch.Tensor):
-                    original_img = original_img.to(device)
-                elif isinstance(original_img, np.ndarray):
-                    original_img = torch.from_numpy(original_img).float()
-                    if len(original_img.shape) == 3 and original_img.shape[2] == 3:
-                        original_img = original_img.permute(2, 0, 1)  # (H,W,C) -> (C,H,W)
-                    original_img = original_img.to(device)
+                # Convert to tensor and move to device for feature extraction
+                original_img = torch.from_numpy(original_img_np).float()
+                if len(original_img.shape) == 3 and original_img.shape[2] == 3:
+                    original_img = original_img.permute(2, 0, 1)  # (H,W,C) -> (C,H,W)
+                original_img = original_img.to(device)
 
                 # Get target feature on same device
                 with torch.no_grad():
                     target_feature = feature_extractor(original_img.unsqueeze(0)).detach().cpu().numpy()
-
-                # Convert tensor back to numpy for submodular function
-                original_img_np = original_img.cpu().permute(1, 2, 0).numpy()  # (C,H,W) -> (H,W,C)
 
                 return submod_func(regions, original_img_np, target_feature)
 
@@ -225,3 +219,4 @@ def create_gain_function(model, feature_extractor, original_images, **kwargs):
             raise e
 
     return gain_fn
+
