@@ -120,31 +120,13 @@ def benchmark_with_theoretical_memory(func, algorithm, num_images, m_per_image, 
 
 
 # ----------------- Cost & Gain ----------------- #
-def cost_fn(region_or_list):
-    """Handle both single region and list of regions"""
-    if isinstance(region_or_list, list):
-        # Handle list of regions
-        total_cost = 0
-        for region in region_or_list:
-            total_cost += region["mask"].sum()
-        return total_cost
-    else:
-        # Handle single region
-        return region_or_list["mask"].sum()
+def cost_fn(region):
+    return region["mask"].sum()
 
 
 # Simple gain function - keep as backup
-def simple_gain_fn(region_or_list):
-    """Handle both single region and list of regions"""
-    if isinstance(region_or_list, list):
-        # Handle list of regions
-        total_gain = 0
-        for region in region_or_list:
-            total_gain += (region["saliency"] * region["mask"]).sum()
-        return total_gain
-    else:
-        # Handle single region
-        return (region_or_list["saliency"] * region_or_list["mask"]).sum()
+def simple_gain_fn(region):
+    return (region["saliency"] * region["mask"]).sum()
 
 
 def build_base_transform(weights):
