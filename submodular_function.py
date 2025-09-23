@@ -129,9 +129,19 @@ class SubmodularFunction:
         if isinstance(mask, np.ndarray):
             mask = torch.from_numpy(mask).float()
 
-        # Ensure mask has same dimensions as image
-        if len(mask.shape) == 2:
-            mask = mask.unsqueeze(0).repeat(3, 1, 1)
+        # Handle different image formats
+        if len(image.shape) == 3:
+            # Image is (H,W,C) format, convert to (C,H,W)
+            if image.shape[2] == 3:  # (H,W,C)
+                image = image.permute(2, 0, 1)  # -> (C,H,W)
+
+        # Ensure mask has same spatial dimensions as image
+        if len(mask.shape) == 2:  # mask is (H,W)
+            if len(image.shape) == 3:  # image is (C,H,W)
+                # Expand mask to (1,H,W) then broadcast to (C,H,W)
+                mask = mask.unsqueeze(0).expand(image.shape[0], -1, -1)
+            else:  # image is also (H,W)
+                pass  # mask is already correct shape
 
         return image * mask
 
@@ -172,20 +182,36 @@ def create_gain_function(model, feature_extractor, original_images, **kwargs):
     submod_func = SubmodularFunction(model, feature_extractor, **kwargs)
 
     def gain_fn(region_or_set):
-        if isinstance(region_or_set, list):
-            regions = region_or_set
-        else:
-            regions = [region_or_set]
+        try:
+            if isinstance(region_or_set, list):
+                regions = region_or_set
+            else:
+                regions = [region_or_set]
 
-        # Get original image and target feature (simplified)
-        if regions:
-            img_id = int(regions[0]['id'].split('_')[0])
-            original_img = torch.from_numpy(original_images[img_id]).float().permute(2, 0, 1)
-            with torch.no_grad():
-                target_feature = feature_extractor(original_img.unsqueeze(0)).detach().cpu().numpy()
+            # Get original image and target feature (simplified)
+            if regions:
+                img_id = int(regions[0]['id'].split('_')[0])
+                # original_images[img_id] should be (H,W,C) numpy array
+                original_img_np = original_images[img_id]  # Keep as numpy for now
 
-            return submod_func(regions, original_img, target_feature)
+                # Convert to tensor and ensure (C,H,W) format for model input
+                original_img = torch.from_numpy(original_img_np).float()
+                if len(original_img.shape) == 3 and original_img.shape[2] == 3:
+                    original_img = original_img.permute(2, 0, 1)  # (H,W,C) -> (C,H,W)
 
-        return 0
+                with torch.no_grad():
+                    target_feature = feature_extractor(original_img.unsqueeze(0)).detach().cpu().numpy()
+
+                # Pass numpy image to submodular function
+                return submod_func(regions, original_img_np, target_feature)
+
+            return 0
+        except Exception as e:
+            print(f"Error in gain_fn: {e}")
+            print(f"Region keys: {regions[0].keys() if regions else 'No regions'}")
+            if regions:
+                print(f"Image shape: {regions[0]['image'].shape}")
+                print(f"Mask shape: {regions[0]['mask'].shape}")
+            raise e
 
     return gain_fn
