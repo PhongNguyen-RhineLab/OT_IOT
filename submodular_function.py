@@ -110,7 +110,7 @@ class SubmodularFunction:
 
         # Apply combined mask
         masked_img = self.apply_mask(regions[0]['image'], combined_mask)
-        with torch.no_torch():
+        with torch.no_grad():
             combined_feature = self.feature_extractor(masked_img.unsqueeze(0)).detach().cpu().numpy()
 
         # Cosine similarity

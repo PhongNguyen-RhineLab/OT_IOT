@@ -1,43 +1,67 @@
 from image_division import image_division
 
 
-def marginal_gain(element, current_set, gain_fn):
-    """Calculate marginal gain efficiently: g(element|current_set)"""
+def fast_marginal_gain(element, current_set, gain_fn, cached_set_gain=None):
+    """Fast marginal gain with caching"""
     if not current_set:
-        return gain_fn([element])  # Pass as list for consistency
+        return gain_fn([element])
 
     gain_with = gain_fn(current_set + [element])
-    gain_without = gain_fn(current_set)
+
+    # Use cached value if available
+    if cached_set_gain is not None:
+        gain_without = cached_set_gain
+    else:
+        gain_without = gain_fn(current_set)
+
     return gain_with - gain_without
 
 
 def OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     """
-    Optimized Online Threshold (OT) algorithm.
+    Fast Online Threshold (OT) algorithm with aggressive optimizations.
     Returns: ((solution_set, gain), memory_aux_data)
     """
-    print("OT: Starting algorithm")
+    print("OT: Starting fast algorithm")
     V = image_division(images, saliency_maps, N, m)
     S, S_prime = [], []
     I_star = None
     I_star_gain = 0
 
-    # Cache for gain computations to avoid recomputation
+    # Cache current gains to avoid recomputation
     S_gain_cache = 0  # g(S)
     S_prime_gain_cache = 0  # g(S')
 
+    # Precompute singleton gains to avoid repeated calls
+    singleton_gains = {}
+    for region in V:
+        singleton_gains[region['id']] = gain_fn([region])
+
     processed = 0
+    total_regions = len(V)
+
     for I_M in V:
         processed += 1
-        if processed % max(1, len(V) // 10) == 0:
-            print(f"OT: Processed {processed}/{len(V)} regions")
+        if processed % max(1, total_regions // 5) == 0:
+            print(f"OT: Processed {processed}/{total_regions} regions")
 
-        # Line 6: Choose candidate with higher marginal gain
-        # Calculate marginal gains efficiently
-        marginal_gain_S = marginal_gain(I_M, S, gain_fn)
-        marginal_gain_S_prime = marginal_gain(I_M, S_prime, gain_fn)
+        region_cost = cost_fn(I_M)
+        singleton_gain = singleton_gains[I_M['id']]
 
-        # Choose the better candidate
+        # Early skip if cost too high
+        if region_cost > budget:
+            continue
+
+        # Update best singleton (without expensive calls)
+        if I_star is None or singleton_gain > I_star_gain:
+            I_star = I_M
+            I_star_gain = singleton_gain
+
+        # Fast marginal gain calculation using cached values
+        marginal_gain_S = fast_marginal_gain(I_M, S, gain_fn, S_gain_cache)
+        marginal_gain_S_prime = fast_marginal_gain(I_M, S_prime, gain_fn, S_prime_gain_cache)
+
+        # Choose better candidate
         if marginal_gain_S >= marginal_gain_S_prime:
             S_d = S
             S_d_gain = S_gain_cache
@@ -49,76 +73,62 @@ def OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
             marginal_g = marginal_gain_S_prime
             is_S = False
 
-        # Line 7: Threshold condition g(I_M|S_d)/c(I_M) >= g(S_d)/B
-        region_cost = cost_fn(I_M)
+        # Threshold condition: g(I_M|S_d)/c(I_M) >= g(S_d)/B
         if region_cost > 0 and marginal_g / region_cost >= S_d_gain / budget:
-            # Line 8: Add to selected candidate
+            # Add to selected candidate and update cache
             if is_S:
                 S = S + [I_M]
-                S_gain_cache += marginal_g  # Update cache efficiently
+                S_gain_cache += marginal_g  # Incremental update
             else:
                 S_prime = S_prime + [I_M]
-                S_prime_gain_cache += marginal_g  # Update cache efficiently
-
-        # Line 9: Update best singleton
-        singleton_gain = gain_fn([I_M])
-        if I_star is None or singleton_gain > I_star_gain:
-            I_star = I_M
-            I_star_gain = singleton_gain
+                S_prime_gain_cache += marginal_g  # Incremental update
 
     print("OT: Selecting final solution...")
 
-    # Lines 10-18: Final selection based on budget constraints
-    cost_S = sum(cost_fn(x) for x in S)
-    cost_S_prime = sum(cost_fn(x) for x in S_prime)
+    # Final selection (compute accurate gains for final decision)
+    cost_S = sum(cost_fn(x) for x in S) if S else 0
+    cost_S_prime = sum(cost_fn(x) for x in S_prime) if S_prime else 0
     cost_I_star = cost_fn(I_star) if I_star else float('inf')
 
-    # Get actual gains (not cached, for final accuracy)
-    gain_S = gain_fn(S) if S else 0
-    gain_S_prime = gain_fn(S_prime) if S_prime else 0
-    gain_I_star = I_star_gain if I_star else 0
+    # Use cached gains for feasible solutions, compute fresh for final accuracy
+    candidates = []
 
-    if cost_S <= budget and cost_S_prime <= budget:
-        # Line 11: Both feasible
-        candidates = [(S, gain_S), (S_prime, gain_S_prime)]
-        if cost_I_star <= budget:
-            candidates.append(([I_star], gain_I_star))
+    if cost_S <= budget:
+        gain_S = gain_fn(S) if S else 0  # Fresh computation for accuracy
+        candidates.append((S, gain_S))
 
+    if cost_S_prime <= budget:
+        gain_S_prime = gain_fn(S_prime) if S_prime else 0
+        candidates.append((S_prime, gain_S_prime))
+
+    if cost_I_star <= budget and I_star:
+        candidates.append(([I_star], I_star_gain))
+
+    # Handle infeasible cases
+    if not candidates:
+        # Both infeasible, use prefixes
+        if S:
+            S1 = get_feasible_prefix(S, budget, cost_fn)
+            if S1:
+                candidates.append((S1, gain_fn(S1)))
+
+        if S_prime:
+            S2 = get_feasible_prefix(S_prime, budget, cost_fn)
+            if S2:
+                candidates.append((S2, gain_fn(S2)))
+
+        if cost_I_star <= budget and I_star:
+            candidates.append(([I_star], I_star_gain))
+
+    # Select best candidate
+    if candidates:
         S_star, g_star = max(candidates, key=lambda x: x[1])
-
-    elif cost_S > budget and cost_S_prime > budget:
-        # Lines 13-15: Both infeasible, take prefixes
-        S1 = get_feasible_prefix(S, budget, cost_fn)
-        S2 = get_feasible_prefix(S_prime, budget, cost_fn)
-
-        candidates = [(S1, gain_fn(S1) if S1 else 0),
-                      (S2, gain_fn(S2) if S2 else 0)]
-        if cost_I_star <= budget:
-            candidates.append(([I_star], gain_I_star))
-
-        S_star, g_star = max(candidates, key=lambda x: x[1])
-
     else:
-        # Lines 16-18: One feasible, one infeasible
-        if cost_S <= budget:
-            feasible, feasible_gain = S, gain_S
-            infeasible = S_prime
-        else:
-            feasible, feasible_gain = S_prime, gain_S_prime
-            infeasible = S
-
-        infeasible_prefix = get_feasible_prefix(infeasible, budget, cost_fn)
-
-        candidates = [(feasible, feasible_gain),
-                      (infeasible_prefix, gain_fn(infeasible_prefix) if infeasible_prefix else 0)]
-        if cost_I_star <= budget:
-            candidates.append(([I_star], gain_I_star))
-
-        S_star, g_star = max(candidates, key=lambda x: x[1])
+        S_star, g_star = [], 0
 
     print(f"OT: Completed. Final gain = {g_star}, |S*| = {len(S_star)}")
 
-    # Memory aux data for OT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
+    # Memory aux data for OT
     memory_aux = {
         'S_size': len(S),
         'S_prime_size': len(S_prime),
