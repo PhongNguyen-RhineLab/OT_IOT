@@ -18,6 +18,33 @@ class SubmodularFunction:
         self.lambda2 = lambda2
         self.lambda3 = lambda3
         self.lambda4 = lambda4
+        # Get device from model
+        self.device = next(model.parameters()).device
+
+    def apply_mask(self, image, mask):
+        """Apply mask to image and ensure correct device"""
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image).float()
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).float()
+
+        # Move to correct device
+        image = image.to(self.device)
+        mask = mask.to(self.device)
+
+        # Handle different image formats
+        if len(image.shape) == 3:
+            # Image is (H,W,C) format, convert to (C,H,W)
+            if image.shape[2] == 3:  # (H,W,C)
+                image = image.permute(2, 0, 1)  # -> (C,H,W)
+
+        # Ensure mask has same spatial dimensions as image
+        if len(mask.shape) == 2:  # mask is (H,W)
+            if len(image.shape) == 3:  # image is (C,H,W)
+                # Expand mask to (1,H,W) then broadcast to (C,H,W)
+                mask = mask.unsqueeze(0).expand(image.shape[0], -1, -1)
+
+        return image * mask
 
     def confidence_score(self, regions):
         """
@@ -83,7 +110,7 @@ class SubmodularFunction:
 
         # Apply combined mask
         masked_img = self.apply_mask(regions[0]['image'], combined_mask)
-        with torch.no_grad():
+        with torch.no_torch():
             combined_feature = self.feature_extractor(masked_img.unsqueeze(0)).detach().cpu().numpy()
 
         # Cosine similarity
@@ -121,29 +148,6 @@ class SubmodularFunction:
         )[0][0]
 
         return 1 - max(0, similarity)
-
-    def apply_mask(self, image, mask):
-        """Apply mask to image"""
-        if isinstance(image, np.ndarray):
-            image = torch.from_numpy(image).float()
-        if isinstance(mask, np.ndarray):
-            mask = torch.from_numpy(mask).float()
-
-        # Handle different image formats
-        if len(image.shape) == 3:
-            # Image is (H,W,C) format, convert to (C,H,W)
-            if image.shape[2] == 3:  # (H,W,C)
-                image = image.permute(2, 0, 1)  # -> (C,H,W)
-
-        # Ensure mask has same spatial dimensions as image
-        if len(mask.shape) == 2:  # mask is (H,W)
-            if len(image.shape) == 3:  # image is (C,H,W)
-                # Expand mask to (1,H,W) then broadcast to (C,H,W)
-                mask = mask.unsqueeze(0).expand(image.shape[0], -1, -1)
-            else:  # image is also (H,W)
-                pass  # mask is already correct shape
-
-        return image * mask
 
     def __call__(self, regions, original_image=None, target_semantic_feature=None):
         """
@@ -189,13 +193,11 @@ def create_gain_function(model, feature_extractor, original_images, **kwargs):
                 regions = [region_or_set]
 
             if regions:
-                # Lấy device từ feature_extractor
-                device = next(feature_extractor.parameters()).device
-
                 img_id = int(regions[0]['id'].split('_')[0])
-
-                # original_images[img_id] is now a numpy array (H,W,C)
                 original_img_np = original_images[img_id]
+
+                # Get device from submodular function
+                device = submod_func.device
 
                 # Convert to tensor and move to device for feature extraction
                 original_img = torch.from_numpy(original_img_np).float()
@@ -219,4 +221,3 @@ def create_gain_function(model, feature_extractor, original_images, **kwargs):
             raise e
 
     return gain_fn
-
