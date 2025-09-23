@@ -143,7 +143,7 @@ def build_base_transform(weights):
 
 
 # ----------------- Dataset loader ----------------- #
-def load_dataset(name: str, weights, root: str, num_samples: int):
+def load_dataset(name: str, weights, root: str, num_samples: int, device=None):
     mean, std = build_base_transform(weights)
 
     def pipeline(extra=None):
@@ -179,9 +179,8 @@ def load_dataset(name: str, weights, root: str, num_samples: int):
         raise ValueError(f"Unsupported dataset: {name}")
 
     loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True)
-    images, saliency_maps = load_dataset(
-        args.dataset, weights, args.data_root, args.num_samples, device
-    )
+    images, saliency_maps = [], []
+
     for img, _ in loader:
         if device:
             img = img.to(device)  # Chuyển input lên GPU
@@ -190,6 +189,7 @@ def load_dataset(name: str, weights, root: str, num_samples: int):
         saliency_maps.append(cam.cpu() if isinstance(cam, torch.Tensor) else cam)
         if len(images) >= num_samples:
             break
+
     return images, saliency_maps
 
 
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     model.eval()
 
     images, saliency_maps = load_dataset(
-        args.dataset, weights, args.data_root, args.num_samples
+        args.dataset, weights, args.data_root, args.num_samples, device
     )
 
     # Choose gain function
