@@ -143,7 +143,7 @@ def build_base_transform(weights):
 
 
 # ----------------- Dataset loader ----------------- #
-def load_dataset(name: str, weights, root: str, num_samples: int, device=None):
+def load_dataset(name: str, weights, root: str, num_samples: int, device=None, model=None):
     mean, std = build_base_transform(weights)
 
     def pipeline(extra=None):
@@ -185,8 +185,16 @@ def load_dataset(name: str, weights, root: str, num_samples: int, device=None):
         if device:
             img = img.to(device)  # Chuyển input lên GPU
         cam = gradcam(model, img)
-        images.append(img[0].cpu().permute(1, 2, 0).numpy())  # Chuyển về CPU để lưu
-        saliency_maps.append(cam.cpu() if isinstance(cam, torch.Tensor) else cam)
+
+        # Lưu image dưới dạng tensor trên cùng device với model để tương thích
+        images.append(img[0])  # Giữ nguyên tensor trên GPU/CPU
+
+        # Chuyển cam về CPU để lưu
+        if isinstance(cam, torch.Tensor):
+            saliency_maps.append(cam.cpu().numpy())
+        else:
+            saliency_maps.append(cam)
+
         if len(images) >= num_samples:
             break
 
@@ -218,7 +226,7 @@ if __name__ == "__main__":
     model.eval()
 
     images, saliency_maps = load_dataset(
-        args.dataset, weights, args.data_root, args.num_samples, device
+        args.dataset, weights, args.data_root, args.num_samples, device, model
     )
 
     # Choose gain function
