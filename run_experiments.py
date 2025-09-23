@@ -236,7 +236,7 @@ if __name__ == "__main__":
         # Greedy Search
         (S_gs, g_gs), t_gs, mem_gs = benchmark_with_theoretical_memory(
             Greedy_Search, "Greedy", args.num_samples, args.m,
-            images, saliency_maps, N=4, m=args.m,
+            images, saliency_maps, N=4, m_regions=args.m,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
         results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs, mem_gs])
@@ -245,7 +245,7 @@ if __name__ == "__main__":
         # OT Algorithm
         (S_ot, g_ot), t_ot, mem_ot = benchmark_with_theoretical_memory(
             OT_algorithm, "OT", args.num_samples, args.m,
-            images, saliency_maps, N=4, m=args.m,
+            images, saliency_maps, N=4, m_regions=args.m,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
         results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot, mem_ot])
@@ -255,7 +255,7 @@ if __name__ == "__main__":
         for eps in args.epsilons:
             (S_iot, g_iot), t_iot, mem_iot = benchmark_with_theoretical_memory(
                 IOT_algorithm, "IOT", args.num_samples, args.m,
-                images, saliency_maps, N=4, m=args.m,
+                images, saliency_maps, N=4, m_regions=args.m,
                 budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
             )
             results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot, mem_iot])
