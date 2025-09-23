@@ -94,7 +94,7 @@ def calculate_theoretical_memory(algorithm, num_images, m, solution_set,
 
 
 # ----------------- Benchmark helper with theoretical memory ----------------- #
-def benchmark_with_theoretical_memory(func, algorithm, num_images, m, *args, **kwargs):
+def benchmark_with_theoretical_memory(func, algorithm, num_images, m_per_image, *args, **kwargs):
     """Benchmark with both runtime and theoretical memory calculation"""
     start = time.time()
     result, aux_memory_data = func(*args, **kwargs)
@@ -111,7 +111,7 @@ def benchmark_with_theoretical_memory(func, algorithm, num_images, m, *args, **k
     # Calculate theoretical memory if we have sample
     if sample_subregion:
         theoretical_memory = calculate_theoretical_memory(
-            algorithm, num_images, m, solution_set, sample_subregion, aux_memory_data
+            algorithm, num_images, m_per_image, solution_set, sample_subregion, aux_memory_data
         )
     else:
         theoretical_memory = 0
@@ -120,13 +120,31 @@ def benchmark_with_theoretical_memory(func, algorithm, num_images, m, *args, **k
 
 
 # ----------------- Cost & Gain ----------------- #
-def cost_fn(region):
-    return region["mask"].sum()
+def cost_fn(region_or_list):
+    """Handle both single region and list of regions"""
+    if isinstance(region_or_list, list):
+        # Handle list of regions
+        total_cost = 0
+        for region in region_or_list:
+            total_cost += region["mask"].sum()
+        return total_cost
+    else:
+        # Handle single region
+        return region_or_list["mask"].sum()
 
 
 # Simple gain function - keep as backup
-def simple_gain_fn(region):
-    return (region["saliency"] * region["mask"]).sum()
+def simple_gain_fn(region_or_list):
+    """Handle both single region and list of regions"""
+    if isinstance(region_or_list, list):
+        # Handle list of regions
+        total_gain = 0
+        for region in region_or_list:
+            total_gain += (region["saliency"] * region["mask"]).sum()
+        return total_gain
+    else:
+        # Handle single region
+        return (region_or_list["saliency"] * region_or_list["mask"]).sum()
 
 
 def build_base_transform(weights):
@@ -236,7 +254,7 @@ if __name__ == "__main__":
         # Greedy Search
         (S_gs, g_gs), t_gs, mem_gs = benchmark_with_theoretical_memory(
             Greedy_Search, "Greedy", args.num_samples, args.m,
-            images, saliency_maps, N=4, m_regions=args.m,
+            images, saliency_maps, N=4, m=args.m,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
         results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs, mem_gs])
@@ -245,7 +263,7 @@ if __name__ == "__main__":
         # OT Algorithm
         (S_ot, g_ot), t_ot, mem_ot = benchmark_with_theoretical_memory(
             OT_algorithm, "OT", args.num_samples, args.m,
-            images, saliency_maps, N=4, m_regions=args.m,
+            images, saliency_maps, N=4, m=args.m,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
         results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot, mem_ot])
@@ -255,7 +273,7 @@ if __name__ == "__main__":
         for eps in args.epsilons:
             (S_iot, g_iot), t_iot, mem_iot = benchmark_with_theoretical_memory(
                 IOT_algorithm, "IOT", args.num_samples, args.m,
-                images, saliency_maps, N=4, m_regions=args.m,
+                images, saliency_maps, N=4, m=args.m,
                 budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
             )
             results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot, mem_iot])

@@ -4,7 +4,7 @@ from image_division import image_division
 def marginal_gain(element, current_set, gain_fn):
     """Calculate marginal gain efficiently: g(element|current_set)"""
     if not current_set:
-        return gain_fn([element])
+        return gain_fn([element])  # Pass as list for consistency
 
     gain_with = gain_fn(current_set + [element])
     gain_without = gain_fn(current_set)
