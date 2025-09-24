@@ -1,136 +1,47 @@
 import argparse
 import time
-import tracemalloc
 import numpy as np
 import pandas as pd
 import torch
-import torchvision
 import torchvision.transforms as transforms
 from torchvision.models import resnet18, ResNet18_Weights
-from torchvision.datasets import (
-    CIFAR10, CIFAR100, STL10,
-    MNIST, FashionMNIST, ImageFolder
-)
+from torchvision.datasets import CIFAR10, CIFAR100, STL10, MNIST, FashionMNIST, ImageFolder
 
-from greedy_search import Greedy_Search
-from ot_algo import OT_algorithm
-from iot_algo import IOT_algorithm
+from tracked_algorithms import Greedy_Search_Tracked, OT_Algorithm_Tracked, IOT_Algorithm_Tracked
 from gradcam import gradcam
-from submodular_function import create_gain_function
 
 
-# ----------------- Memory calculation helper ----------------- #
-def calculate_sizeof_subregion(sample_region):
-    """Calculate size of one subregion in KB"""
-    size_bytes = 0
-
-    # Size of mask (H × W × 4 bytes for float32)
-    if 'mask' in sample_region:
-        mask = sample_region['mask']
-        size_bytes += mask.nbytes
-
-    # Size of saliency map (H × W × 4 bytes for float32)
-    if 'saliency' in sample_region:
-        saliency = sample_region['saliency']
-        size_bytes += saliency.nbytes
-
-    # Size of image reference (H × W × C × 4 bytes for float32)
-    if 'image' in sample_region:
-        image = sample_region['image']
-        if isinstance(image, np.ndarray):
-            size_bytes += image.nbytes
-        else:
-            # Estimate size if not numpy array
-            size_bytes += 224 * 224 * 3 * 4  # Typical CNN input size
-
-    # Size of metadata (id, gain_val, etc.) - small overhead
-    size_bytes += 64  # Estimated string + float overhead
-
-    return size_bytes / 1024  # Convert to KB
-
-
-def calculate_theoretical_memory(algorithm, num_images, m, solution_set,
-                                 sample_subregion, aux_data=None):
-    """
-    Calculate theoretical memory usage according to the formulas:
-
-    Greedy: M = Số ảnh * m * sizeof(1 subregion) + |S| * sizeof(1 subregion)
-    OT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
-    IOT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub) + |max of S_tau + max of S'_tau + S_b| * sizeof(1 sub)
-    """
-    sizeof_subregion = calculate_sizeof_subregion(sample_subregion)
-
-    if algorithm == "Greedy":
-        # M = Số ảnh * m * sizeof(1 subregion) + |S| * sizeof(1 subregion)
-        memory = (num_images * m + len(solution_set)) * sizeof_subregion
-
-    elif algorithm == "OT":
-        # M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
-        # aux_data should contain sizes of S, S', and I_star
-        S_size = aux_data.get('S_size', 0) if aux_data else 0
-        S_prime_size = aux_data.get('S_prime_size', 0) if aux_data else 0
-        I_star_size = 1 if aux_data and aux_data.get('has_I_star', False) else 0
-
-        memory = m * sizeof_subregion + (S_size + S_prime_size + I_star_size) * sizeof_subregion
-
-    elif algorithm == "IOT":
-        # M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub) + |max of S_tau + max of S'_tau + S_b| * sizeof(1 sub)
-        S_size = aux_data.get('S_size', 0) if aux_data else 0
-        S_prime_size = aux_data.get('S_prime_size', 0) if aux_data else 0
-        I_star_size = 1 if aux_data and aux_data.get('has_I_star', False) else 0
-
-        # Additional memory for IOT candidates
-        max_S_tau = aux_data.get('max_S_tau_size', 0) if aux_data else 0
-        max_S_prime_tau = aux_data.get('max_S_prime_tau_size', 0) if aux_data else 0
-        S_b_size = aux_data.get('S_b_size', 0) if aux_data else 0
-
-        memory = (m * sizeof_subregion +
-                  (S_size + S_prime_size + I_star_size) * sizeof_subregion +
-                  (max_S_tau + max_S_prime_tau + S_b_size) * sizeof_subregion)
-    else:
-        memory = 0
-
-    return memory
-
-
-# ----------------- Benchmark helper with theoretical memory ----------------- #
-def benchmark_with_theoretical_memory(func, algorithm, num_images, m_per_image, *args, **kwargs):
-    """Benchmark with both runtime and theoretical memory calculation"""
+# Enhanced benchmark with operation tracking
+def benchmark_with_tracking(func, *args, **kwargs):
+    """Benchmark with runtime and operation tracking"""
     start = time.time()
-    result, aux_memory_data = func(*args, **kwargs)
+    result, aux_data = func(*args, **kwargs)
     runtime = time.time() - start
 
-    # Extract solution and sample subregion for memory calculation
-    if result and len(result) > 0 and isinstance(result[0], list):
-        solution_set = result[0]
-        sample_subregion = solution_set[0] if solution_set else None
-    else:
-        solution_set = []
-        sample_subregion = None
+    # Extract operation summary
+    operation_summary = aux_data.get('operation_summary', {})
 
-    # Calculate theoretical memory if we have sample
-    if sample_subregion:
-        theoretical_memory = calculate_theoretical_memory(
-            algorithm, num_images, m_per_image, solution_set, sample_subregion, aux_memory_data
-        )
-    else:
-        theoretical_memory = 0
-
-    return result, runtime, theoretical_memory
+    return result, runtime, operation_summary, aux_data
 
 
-# ----------------- Cost & Gain ----------------- #
-def cost_fn(region):
-    return region["mask"].sum()
+# Cost & Gain functions
+def cost_fn(region_or_list):
+    if isinstance(region_or_list, list):
+        if not region_or_list:
+            return 0
+        return sum(r["mask"].sum() for r in region_or_list)
+    return region_or_list["mask"].sum()
 
 
-# Simple gain function - keep as backup
-def simple_gain_fn(region):
-    return (region["saliency"] * region["mask"]).sum()
+def simple_gain_fn(region_or_list):
+    if isinstance(region_or_list, list):
+        if not region_or_list:
+            return 0
+        return sum((r["saliency"] * r["mask"]).sum() for r in region_or_list)
+    return (region_or_list["saliency"] * region_or_list["mask"]).sum()
 
 
 def build_base_transform(weights):
-    # Robust extraction of mean/std
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
     try:
@@ -142,8 +53,7 @@ def build_base_transform(weights):
     return mean, std
 
 
-# ----------------- Dataset loader ----------------- #
-def load_dataset(name: str, weights, root: str, num_samples: int, device=None, model=None):
+def load_dataset(name: str, weights, root: str, num_samples: int):
     mean, std = build_base_transform(weights)
 
     def pipeline(extra=None):
@@ -165,126 +75,139 @@ def load_dataset(name: str, weights, root: str, num_samples: int, device=None, m
     elif name == "fashionmnist":
         ds = FashionMNIST(root=root, train=False, download=True,
                           transform=pipeline([transforms.Grayscale(num_output_channels=3)]))
-    elif name == "imagenet":
-        if not root:
-            raise ValueError("Provide --data-root pointing to ImageNet split directory.")
-        try:
-            tf = weights.transforms()
-            if not hasattr(tf, "__call__"):
-                raise RuntimeError
-            ds = ImageFolder(root=root, transform=tf)
-        except Exception:
-            ds = ImageFolder(root=root, transform=pipeline())
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 
     loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True)
     images, saliency_maps = [], []
-
     for img, _ in loader:
-        if device:
-            img = img.to(device)  # Chuyển input lên GPU
         cam = gradcam(model, img)
-
-        # Lưu image dưới dạng numpy array với format (H,W,C) cho image_division
-        img_np = img[0].cpu().permute(1, 2, 0).numpy()  # (C,H,W) -> (H,W,C)
-        images.append(img_np)
-
-        # Chuyển cam về CPU để lưu
-        if isinstance(cam, torch.Tensor):
-            saliency_maps.append(cam.cpu().numpy())
-        else:
-            saliency_maps.append(cam)
-
+        images.append(img[0].permute(1, 2, 0).numpy())
+        saliency_maps.append(cam)
         if len(images) >= num_samples:
             break
-
     return images, saliency_maps
 
 
-# ----------------- Main ----------------- #
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="cifar10",
-                        choices=["cifar10", "cifar100", "stl10",
-                                 "mnist", "fashionmnist", "imagenet"])
-    parser.add_argument("--data-root", default="./data",
-                        help="Root folder (used for downloads or ImageNet path).")
-    parser.add_argument("--num-samples", type=int, default=10)
-    parser.add_argument("--budgets", type=int, nargs="+", default=[2000, 4000, 8000])
-    parser.add_argument("--epsilons", type=float, nargs="+", default=[0.1, 0.3])
-    parser.add_argument("--use-submodular", action="store_true",
-                        help="Use full submodular function instead of simple saliency")
-    parser.add_argument("--m", type=int, default=5, help="Number of subregions per image")
+                        choices=["cifar10", "cifar100", "stl10", "mnist", "fashionmnist"])
+    parser.add_argument("--data-root", default="./data")
+    parser.add_argument("--num-samples", type=int, default=3)
+    parser.add_argument("--budgets", type=int, nargs="+", default=[2000])
+    parser.add_argument("--epsilons", type=float, nargs="+", default=[0.3])
+    parser.add_argument("--m", type=int, default=5)
     args = parser.parse_args()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
 
     weights = ResNet18_Weights.DEFAULT
     model = resnet18(weights=weights)
-    model = model.to(device)  # Chuyển model lên GPU
     model.eval()
 
     images, saliency_maps = load_dataset(
-        args.dataset, weights, args.data_root, args.num_samples, device, model
+        args.dataset, weights, args.data_root, args.num_samples
     )
 
-    # Choose gain function
-    if args.use_submodular:
-        print("Using full submodular function (4 components)")
-        feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
-        feature_extractor = feature_extractor.to(device)  # Chuyển lên GPU
-        feature_extractor.eval()
-
-        gain_fn = create_gain_function(
-            model=model,
-            feature_extractor=feature_extractor,
-            original_images=images,
-            lambda1=1.0, lambda2=1.0, lambda3=1.0, lambda4=1.0
-        )
-    else:
-        print("Using simple saliency-based gain function")
-        gain_fn = simple_gain_fn
+    print(f"Loaded {len(images)} images from {args.dataset}")
 
     results = []
+    operation_results = []
+
     for B in args.budgets:
-        print(f"\n=== Budget: {B} ===")
+        print(f"\n{'=' * 60}")
+        print(f"BUDGET: {B}")
+        print(f"{'=' * 60}")
 
-        # Greedy Search
-        (S_gs, g_gs), t_gs, mem_gs = benchmark_with_theoretical_memory(
-            Greedy_Search, "Greedy", args.num_samples, args.m,
+        # Test Greedy Search
+        print(f"\n--- GREEDY SEARCH (Algorithm GS) ---")
+        (S_gs, g_gs), t_gs, ops_gs, mem_gs = benchmark_with_tracking(
+            Greedy_Search_Tracked,
             images, saliency_maps, N=4, m=args.m,
-            budget=B, cost_fn=cost_fn, gain_fn=gain_fn
+            budget=B, cost_fn=cost_fn, gain_fn=simple_gain_fn
         )
-        results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs, mem_gs])
-        print(f"Greedy: |S|={len(S_gs)}, g(S)={g_gs:.3f}, time={t_gs:.3f}s, mem={mem_gs:.1f}KB")
 
-        # OT Algorithm
-        (S_ot, g_ot), t_ot, mem_ot = benchmark_with_theoretical_memory(
-            OT_algorithm, "OT", args.num_samples, args.m,
+        results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs])
+        operation_results.append(["Greedy", B, ops_gs.get('total_oracle_calls', 0),
+                                  ops_gs.get('gain_calls', 0), ops_gs.get('marginal_gain_calls', 0),
+                                  ops_gs.get('threshold_checks', 0), ops_gs.get('iterations', 0)])
+
+        print(f"Results: |S|={len(S_gs)}, gain={g_gs:.3f}, time={t_gs:.3f}s")
+
+        # Test OT Algorithm
+        print(f"\n--- OT ALGORITHM (Algorithm 2) ---")
+        (S_ot, g_ot), t_ot, ops_ot, mem_ot = benchmark_with_tracking(
+            OT_Algorithm_Tracked,
             images, saliency_maps, N=4, m=args.m,
-            budget=B, cost_fn=cost_fn, gain_fn=gain_fn
+            budget=B, cost_fn=cost_fn, gain_fn=simple_gain_fn
         )
-        results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot, mem_ot])
-        print(f"OT: |S|={len(S_ot)}, g(S)={g_ot:.3f}, time={t_ot:.3f}s, mem={mem_ot:.1f}KB")
 
-        # IOT Algorithm
+        results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot])
+        operation_results.append(["OT", B, ops_ot.get('total_oracle_calls', 0),
+                                  ops_ot.get('gain_calls', 0), ops_ot.get('marginal_gain_calls', 0),
+                                  ops_ot.get('threshold_checks', 0), ops_ot.get('iterations', 0)])
+
+        print(f"Results: |S|={len(S_ot)}, gain={g_ot:.3f}, time={t_ot:.3f}s")
+
+        # Test IOT Algorithm
         for eps in args.epsilons:
-            (S_iot, g_iot), t_iot, mem_iot = benchmark_with_theoretical_memory(
-                IOT_algorithm, "IOT", args.num_samples, args.m,
+            print(f"\n--- IOT ALGORITHM (Algorithm 3, ε={eps}) ---")
+            (S_iot, g_iot), t_iot, ops_iot, mem_iot = benchmark_with_tracking(
+                IOT_Algorithm_Tracked,
                 images, saliency_maps, N=4, m=args.m,
-                budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
+                budget=B, eps=eps, cost_fn=cost_fn, gain_fn=simple_gain_fn
             )
-            results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot, mem_iot])
-            print(f"IOT (ε={eps}): |S|={len(S_iot)}, g(S)={g_iot:.3f}, time={t_iot:.3f}s, mem={mem_iot:.1f}KB")
 
-    df = pd.DataFrame(results, columns=[
-        "Algorithm", "Dataset", "Budget", "Epsilon", "SetSize", "Gain", "Time(s)", "Memory(KB)"
+            results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot])
+            operation_results.append(["IOT", B, ops_iot.get('total_oracle_calls', 0),
+                                      ops_iot.get('gain_calls', 0), ops_iot.get('marginal_gain_calls', 0),
+                                      ops_iot.get('threshold_checks', 0), ops_iot.get('iterations', 0)])
+
+            print(f"Results: |S|={len(S_iot)}, gain={g_iot:.3f}, time={t_iot:.3f}s")
+
+    # Save main results
+    df_results = pd.DataFrame(results, columns=[
+        "Algorithm", "Dataset", "Budget", "Epsilon", "SetSize", "Gain", "Time(s)"
     ])
 
-    suffix = "_submodular" if args.use_submodular else "_simple"
-    out_file = f"experiment_results{suffix}.csv"
-    df.to_csv(out_file, index=False)
-    print(f"\nSaved results to {out_file}")
-    print(df)
+    # Save operation tracking results
+    df_operations = pd.DataFrame(operation_results, columns=[
+        "Algorithm", "Budget", "Total_Oracle_Calls", "Gain_Calls", "Marginal_Gain_Calls",
+        "Threshold_Checks", "Iterations"
+    ])
+
+    print(f"\n{'=' * 60}")
+    print("FINAL RESULTS")
+    print(f"{'=' * 60}")
+    print(df_results)
+
+    print(f"\n{'=' * 60}")
+    print("OPERATION ANALYSIS")
+    print(f"{'=' * 60}")
+    print(df_operations)
+
+    # Save to files
+    df_results.to_csv("algorithm_results.csv", index=False)
+    df_operations.to_csv("operation_analysis.csv", index=False)
+    print(f"\nSaved results to algorithm_results.csv and operation_analysis.csv")
+
+    # Theoretical vs Actual Analysis
+    print(f"\n{'=' * 60}")
+    print("THEORETICAL VS ACTUAL COMPLEXITY")
+    print(f"{'=' * 60}")
+
+    n = len(images) * args.m  # Total regions
+
+    for _, row in df_operations.iterrows():
+        alg = row['Algorithm']
+        oracle_calls = row['Total_Oracle_Calls']
+
+        if alg == "Greedy":
+            theoretical = f"O(n^2) ≈ {n ** 2}"
+        elif alg == "OT":
+            theoretical = f"O(n) ≈ {3 * n}"  # 3n as per paper
+        elif alg == "IOT":
+            theoretical = f"O(5n) ≈ {5 * n}"  # 5n as per paper
+        else:
+            theoretical = "Unknown"
+
+        print(f"{alg:8s}: Actual={oracle_calls:4d}, Theoretical={theoretical}")
