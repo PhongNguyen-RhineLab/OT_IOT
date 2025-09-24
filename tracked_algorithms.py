@@ -173,6 +173,7 @@ def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
 def OT_Algorithm_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     """
     OT Algorithm following Algorithm 2 with operation tracking.
+    Compatible with original function signature.
     """
     tracker = OperationTracker("Online Threshold (OT)")
     print("OT: Starting Algorithm 2 with tracking")
