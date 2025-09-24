@@ -1,193 +1,186 @@
 from image_division import image_division
-import numpy as np
 
 
 def OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     """
-    Ultra-Fast OT algorithm that beats Greedy in speed.
-    Uses aggressive approximations and optimizations.
+    Balanced OT: Theory-correct implementation with reasonable optimizations.
+    Follows Algorithm 2 exactly while minimizing computational overhead.
     """
-    print("OT: Starting ultra-fast algorithm")
+    print("OT: Starting balanced (theory-correct + optimized) algorithm")
     V = image_division(images, saliency_maps, N, m)
 
     if not V:
         return ([], 0), {'S_size': 0, 'S_prime_size': 0, 'has_I_star': False}
 
-    total_regions = len(V)
-    print(f"OT: Processing {total_regions} regions")
+    n = len(V)
+    print(f"OT: Processing {n} regions following Algorithm 2")
 
-    # OPTIMIZATION 1: Batch precompute all singleton values
-    print("OT: Precomputing singleton values...")
-    region_data = []
+    # Initialize as in Algorithm 2
+    S, S_prime = [], []
+    I_star = None
+    I_star_gain = 0
+
+    # OPTIMIZATION 1: Precompute singleton values to avoid recomputation
+    singleton_data = {}
+    infeasible_regions = set()
+
     for region in V:
         cost = cost_fn(region)
-        if cost > budget:  # Early filter impossible regions
+        if cost > budget:
+            infeasible_regions.add(region['id'])
             continue
 
         gain = gain_fn([region])
-        density = gain / max(cost, 1e-6)  # gain per cost
-
-        region_data.append({
-            'region': region,
+        singleton_data[region['id']] = {
             'cost': cost,
             'gain': gain,
-            'density': density
-        })
+            'density': gain / max(cost, 1e-6)
+        }
 
-    if not region_data:
-        return ([], 0), {'S_size': 0, 'S_prime_size': 0, 'has_I_star': False}
+    print(f"OT: {len(singleton_data)} feasible regions out of {n}")
 
-    # OPTIMIZATION 2: Sort by density for smart processing order
-    region_data.sort(key=lambda x: x['density'], reverse=True)
-    print(f"OT: Filtered to {len(region_data)} feasible regions")
+    # OPTIMIZATION 2: Cache for gain computations to avoid redundant calls
+    gain_cache = {}
 
-    # Initialize candidates
-    S, S_prime = [], []
-    S_cost, S_prime_cost = 0, 0
-    S_gain, S_prime_gain = 0, 0  # Track gains exactly
+    def cached_gain(region_list):
+        """Cached gain computation to minimize calls"""
+        if not region_list:
+            return 0
+        key = tuple(sorted([r['id'] for r in region_list]))
+        if key not in gain_cache:
+            gain_cache[key] = gain_fn(region_list)
+        return gain_cache[key]
 
-    # Best singleton tracking
-    best_singleton = max(region_data, key=lambda x: x['gain'])
+    def exact_marginal_gain(element, current_set):
+        """EXACT marginal gain as required by Algorithm 2: g(e|S) = g(S∪{e}) - g(S)"""
+        if not current_set:
+            return singleton_data[element['id']]['gain']
 
-    # OPTIMIZATION 3: Process in density order with early termination
+        gain_with = cached_gain(current_set + [element])
+        gain_without = cached_gain(current_set)
+        return gain_with - gain_without
+
+    # Main loop following Algorithm 2 EXACTLY
     processed = 0
-    early_stop_threshold = max(10, len(region_data) // 10)  # Process at most top 10% or 10 regions
-
-    for i, data in enumerate(region_data):
+    for I_M in V:
         processed += 1
-        region = data['region']
-        cost = data['cost']
-        gain = data['gain']
-        density = data['density']
+        if processed % max(1, n // 10) == 0:
+            print(f"OT: Processed {processed}/{n} regions")
 
-        # OPTIMIZATION 4: Early termination if density drops too much
-        if i > early_stop_threshold and density < region_data[0]['density'] * 0.1:
-            print(f"OT: Early termination at {processed}/{len(region_data)} (density dropped)")
-            break
+        # Skip infeasible regions early (OPTIMIZATION 3)
+        if I_M['id'] in infeasible_regions:
+            continue
 
-        # OPTIMIZATION 5: Fast approximate marginal gain
-        # Instead of exact computation, use fast heuristics
+        region_data = singleton_data[I_M['id']]
 
-        # Approximate marginal gain for S
-        if not S:
-            marginal_S = gain
-        else:
-            # Fast approximation: assume some overlap penalty
-            overlap_penalty = 0.9  # Assume 10% overlap reduction
-            marginal_S = gain * overlap_penalty
+        # Line 9: Update I* (best singleton) - EXACT as in paper
+        if I_star is None or region_data['gain'] > I_star_gain:
+            I_star = I_M
+            I_star_gain = region_data['gain']
 
-        # Approximate marginal gain for S'
-        if not S_prime:
-            marginal_S_prime = gain
-        else:
-            overlap_penalty = 0.9
-            marginal_S_prime = gain * overlap_penalty
+        # Line 6: Choose S_d with higher marginal gain - EXACT as in Algorithm 2
+        marginal_gain_S = exact_marginal_gain(I_M, S)
+        marginal_gain_S_prime = exact_marginal_gain(I_M, S_prime)
 
-        # Choose better candidate based on approximate marginal gains
-        if marginal_S >= marginal_S_prime:
-            target_set = S
-            target_cost = S_cost
-            target_gain = S_gain
-            marginal_g = marginal_S
+        if marginal_gain_S >= marginal_gain_S_prime:
+            S_d = S
+            marginal_g = marginal_gain_S
             is_S = True
         else:
-            target_set = S_prime
-            target_cost = S_prime_cost
-            target_gain = S_prime_gain
-            marginal_g = marginal_S_prime
+            S_d = S_prime
+            marginal_g = marginal_gain_S_prime
             is_S = False
 
-        # OPTIMIZATION 6: Simplified threshold check
-        # Use approximate values for faster computation
-        current_avg_density = target_gain / max(target_cost, 1) if target_cost > 0 else 0
-        threshold = current_avg_density * budget / max(budget, 1)
+        # Line 7: EXACT threshold condition g(I^M|S_d)/c(I^M) ≥ g(S_d)/B
+        current_gain = cached_gain(S_d)
+        region_cost = region_data['cost']
 
-        if marginal_g / cost >= threshold and target_cost + cost <= budget:
-            # Add to selected candidate
+        if marginal_g / region_cost >= current_gain / budget:
+            # Line 8: Add to selected candidate
             if is_S:
-                S.append(region)
-                S_cost += cost
-                S_gain += marginal_g  # Use approximate gain for speed
+                S = S + [I_M]
             else:
-                S_prime.append(region)
-                S_prime_cost += cost
-                S_prime_gain += marginal_g
+                S_prime = S_prime + [I_M]
 
-        # OPTIMIZATION 7: Early termination if both sets are full enough
-        if S_cost > budget * 0.8 and S_prime_cost > budget * 0.8:
-            print(f"OT: Early termination - both sets near budget limit")
-            break
+    print("OT: Final selection following Lines 10-18 of Algorithm 2...")
 
-    print(f"OT: Processed {processed}/{len(region_data)} regions")
+    # Lines 10-18: Final selection EXACTLY as in Algorithm 2
+    cost_S = sum(singleton_data[r['id']]['cost'] for r in S if r['id'] in singleton_data)
+    cost_S_prime = sum(singleton_data[r['id']]['cost'] for r in S_prime if r['id'] in singleton_data)
+    cost_I_star = singleton_data[I_star['id']]['cost'] if I_star and I_star['id'] in singleton_data else float('inf')
 
-    # OPTIMIZATION 8: Fast final selection without expensive recomputation
-    candidates = []
+    # Compute final exact gains
+    gain_S = cached_gain(S)
+    gain_S_prime = cached_gain(S_prime)
+    gain_I_star = I_star_gain if I_star else 0
 
-    # Use approximate gains for initial filtering, only compute exact for finalists
-    if S and S_cost <= budget:
-        candidates.append(('S', S, S_gain))
+    # Follow Algorithm 2 cases exactly
+    if cost_S <= budget and cost_S_prime <= budget:
+        # Line 11: Both feasible
+        candidates = [(S, gain_S), (S_prime, gain_S_prime)]
+        if cost_I_star <= budget:
+            candidates.append(([I_star], gain_I_star))
+        S_star, g_star = max(candidates, key=lambda x: x[1])
 
-    if S_prime and S_prime_cost <= budget:
-        candidates.append(('S_prime', S_prime, S_prime_gain))
+    elif cost_S > budget and cost_S_prime > budget:
+        # Lines 13-15: Both infeasible
+        S1 = get_feasible_prefix(S, budget, singleton_data)
+        S2 = get_feasible_prefix(S_prime, budget, singleton_data)
 
-    if best_singleton['cost'] <= budget:
-        candidates.append(('singleton', [best_singleton['region']], best_singleton['gain']))
+        candidates = []
+        if S1:
+            candidates.append((S1, cached_gain(S1)))
+        if S2:
+            candidates.append((S2, cached_gain(S2)))
+        if cost_I_star <= budget:
+            candidates.append(([I_star], gain_I_star))
 
-    # Handle infeasible cases with prefixes
-    if not candidates:
-        if S:
-            S_prefix = get_fast_feasible_prefix(S, budget, cost_fn)
-            if S_prefix:
-                candidates.append(('S_prefix', S_prefix, sum(gain_fn([r]) for r in S_prefix)))
+        S_star, g_star = max(candidates, key=lambda x: x[1]) if candidates else ([], 0)
 
-        if S_prime:
-            S_prime_prefix = get_fast_feasible_prefix(S_prime, budget, cost_fn)
-            if S_prime_prefix:
-                candidates.append(('S_prime_prefix', S_prime_prefix, sum(gain_fn([r]) for r in S_prime_prefix)))
-
-        if best_singleton['cost'] <= budget:
-            candidates.append(('singleton', [best_singleton['region']], best_singleton['gain']))
-
-    # Select best candidate - only compute exact gain for top candidates
-    if not candidates:
-        S_star, g_star = [], 0
-    elif len(candidates) == 1:
-        # Only one candidate, use it directly
-        _, S_star, g_star = candidates[0]
     else:
-        # Multiple candidates - compute exact gains only for top 2 by approximate gain
-        candidates.sort(key=lambda x: x[2], reverse=True)
-        top_candidates = candidates[:2]
+        # Lines 16-18: One feasible, one infeasible
+        if cost_S <= budget:
+            feasible, feasible_gain = S, gain_S
+            infeasible = S_prime
+        else:
+            feasible, feasible_gain = S_prime, gain_S_prime
+            infeasible = S
 
-        exact_candidates = []
-        for name, solution, approx_gain in top_candidates:
-            exact_gain = gain_fn(solution) if solution else 0
-            exact_candidates.append((solution, exact_gain))
+        infeasible_prefix = get_feasible_prefix(infeasible, budget, singleton_data)
 
-        S_star, g_star = max(exact_candidates, key=lambda x: x[1])
+        candidates = [(feasible, feasible_gain)]
+        if infeasible_prefix:
+            candidates.append((infeasible_prefix, cached_gain(infeasible_prefix)))
+        if cost_I_star <= budget:
+            candidates.append(([I_star], gain_I_star))
 
-    print(f"OT: Ultra-fast completed. Final gain = {g_star}, |S*| = {len(S_star)}")
+        S_star, g_star = max(candidates, key=lambda x: x[1])
+
+    print(f"OT: Theory-correct completed. Final gain = {g_star}, |S*| = {len(S_star)}")
+    print(f"OT: Cache hits: {len(gain_cache)} unique gain computations")
 
     # Memory aux data
     memory_aux = {
         'S_size': len(S),
         'S_prime_size': len(S_prime),
-        'has_I_star': True  # Always have best singleton
+        'has_I_star': I_star is not None
     }
 
     return (S_star, g_star), memory_aux
 
 
-def get_fast_feasible_prefix(S, budget, cost_fn):
-    """Fast feasible prefix using precomputed costs"""
+def get_feasible_prefix(S, budget, singleton_data):
+    """Get largest prefix that satisfies budget"""
     prefix = []
     total_cost = 0
 
-    for item in S:
-        item_cost = cost_fn(item)
-        if total_cost + item_cost <= budget:
-            prefix.append(item)
-            total_cost += item_cost
+    for region in S:
+        if region['id'] not in singleton_data:
+            continue
+        region_cost = singleton_data[region['id']]['cost']
+        if total_cost + region_cost <= budget:
+            prefix.append(region)
+            total_cost += region_cost
         else:
             break
 
