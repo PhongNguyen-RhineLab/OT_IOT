@@ -1,4 +1,77 @@
 from image_division import image_division
+from tracked_algorithms import OperationTracker
+
+
+def OT_Algorithm_Corrected(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
+    tracker = OperationTracker("OT (Corrected)")
+
+    V = image_division(images, saliency_maps, N, m)
+    S, S_prime, I_star = [], [], None
+
+    # Cache để tránh tính lại
+    cached_gains = {}
+
+    def get_cached_gain(region_list):
+        key = tuple(sorted([r['id'] for r in region_list]))
+        if key not in cached_gains:
+            tracker.count_gain_call()
+            cached_gains[key] = gain_fn(region_list)
+        return cached_gains[key]
+
+    for I_M in V:
+        tracker.count_iteration()
+
+        # Tính g(S∪{I^M}) - 1 oracle call
+        gain_S_union = get_cached_gain(S + [I_M])
+
+        # Tính g(S'∪{I^M}) - 1 oracle call
+        gain_S_prime_union = get_cached_gain(S_prime + [I_M])
+
+        # Lấy g(S) và g(S') từ cache (đã tính từ iteration trước)
+        gain_S = get_cached_gain(S)
+        gain_S_prime = get_cached_gain(S_prime)
+
+        # Marginal gains - không cần oracle calls thêm
+        marginal_S = gain_S_union - gain_S
+        marginal_S_prime = gain_S_prime_union - gain_S_prime
+
+        # Chọn candidate tốt hơn
+        if marginal_S >= marginal_S_prime:
+            S_d = S
+            marginal_g = marginal_S
+            current_gain = gain_S
+            is_S = True
+        else:
+            S_d = S_prime
+            marginal_g = marginal_S_prime
+            current_gain = gain_S_prime
+            is_S = False
+
+        # Threshold check
+        region_cost = cost_fn(I_M)
+        if marginal_g / region_cost >= current_gain / budget:
+            if is_S:
+                S.append(I_M)
+            else:
+                S_prime.append(I_M)
+
+        # Update I* - 1 oracle call cho singleton
+        tracker.count_singleton_gain_call()
+        singleton_gain = gain_fn([I_M])
+        if I_star is None or singleton_gain > get_cached_gain([I_star]):
+            I_star = I_M
+
+    # Final selection
+    final_candidates = []
+    for candidate in [S, S_prime, [I_star] if I_star else []]:
+        if candidate and sum(cost_fn(x) for x in candidate) <= budget:
+            final_candidates.append((candidate, get_cached_gain(candidate)))
+
+    return max(final_candidates, key=lambda x: x[1]) if final_candidates else ([], 0)
+
+# Oracle calls cho OT:
+# Mỗi iteration: 2 g(S∪{I^M}) calls + 1 g({I^M}) call = 3 calls
+# Total: 3n calls (chính xác như paper!)
 
 
 def OT_algorithm(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
