@@ -10,19 +10,36 @@ class OperationTracker:
         self.reset()
 
     def reset(self):
-        self.gain_function_calls = 0
-        self.marginal_gain_calls = 0
+        # Separate tracking for different types of gain function calls
+        self.gain_function_calls = 0  # g(S) calls
+        self.marginal_gain_calls = 0  # g(e|S) calls (computed as g(S∪{e}) - g(S))
+        self.singleton_gain_calls = 0  # g({e}) calls
+
+        # Detailed breakdown of gain calls in marginal computation
+        self.gain_union_calls = 0  # g(S ∪ {e}) calls
+        self.gain_current_set_calls = 0  # g(S) calls in marginal computation
+
         self.cost_function_calls = 0
         self.set_operations = 0  # Union, intersection, etc.
         self.comparisons = 0
         self.iterations = 0
         self.threshold_checks = 0
 
-    def count_gain_call(self):
+    def count_gain_call(self, call_type="general"):
+        """Count gain function calls with type specification"""
         self.gain_function_calls += 1
+        if call_type == "union":
+            self.gain_union_calls += 1
+        elif call_type == "current_set":
+            self.gain_current_set_calls += 1
 
     def count_marginal_gain_call(self):
+        """Count when we compute a marginal gain g(e|S)"""
         self.marginal_gain_calls += 1
+
+    def count_singleton_gain_call(self):
+        """Count when we compute g({e})"""
+        self.singleton_gain_calls += 1
 
     def count_cost_call(self):
         self.cost_function_calls += 1
@@ -42,21 +59,29 @@ class OperationTracker:
     def get_summary(self):
         return {
             'algorithm': self.algorithm_name,
-            'gain_calls': self.gain_function_calls,
+            'total_gain_calls': self.gain_function_calls,
             'marginal_gain_calls': self.marginal_gain_calls,
+            'singleton_gain_calls': self.singleton_gain_calls,
+            'gain_union_calls': self.gain_union_calls,
+            'gain_current_set_calls': self.gain_current_set_calls,
             'cost_calls': self.cost_function_calls,
             'set_operations': self.set_operations,
             'comparisons': self.comparisons,
             'iterations': self.iterations,
             'threshold_checks': self.threshold_checks,
-            'total_oracle_calls': self.gain_function_calls + self.marginal_gain_calls
+            'total_oracle_calls': self.gain_function_calls + self.singleton_gain_calls
         }
 
     def print_summary(self):
         summary = self.get_summary()
-        print(f"\n=== {self.algorithm_name} OPERATION SUMMARY ===")
-        print(f"Gain function calls g(S): {summary['gain_calls']}")
-        print(f"Marginal gain calls g(e|S): {summary['marginal_gain_calls']}")
+        print(f"\n=== {self.algorithm_name} DETAILED OPERATION SUMMARY ===")
+        print(f"Total g(·) function calls: {summary['total_gain_calls']}")
+        print(f"  ├── g(S ∪ {{e}}) calls: {summary['gain_union_calls']}")
+        print(f"  ├── g(S) calls: {summary['gain_current_set_calls']}")
+        print(
+            f"  └── Other g(·) calls: {summary['total_gain_calls'] - summary['gain_union_calls'] - summary['gain_current_set_calls']}")
+        print(f"Marginal gain g(e|S) computations: {summary['marginal_gain_calls']}")
+        print(f"Singleton g({{e}}) calls: {summary['singleton_gain_calls']}")
         print(f"Total oracle calls: {summary['total_oracle_calls']}")
         print(f"Cost function calls: {summary['cost_calls']}")
         print(f"Set operations (∪, ∩, \\): {summary['set_operations']}")
@@ -66,20 +91,21 @@ class OperationTracker:
 
 
 def tracked_marginal_gain(element, current_set, gain_fn, tracker):
-    """Calculate marginal gain with tracking: g(I^M|S) = g(S ∪ {I^M}) - g(S)"""
+    """Calculate marginal gain with detailed tracking: g(I^M|S) = g(S ∪ {I^M}) - g(S)"""
     tracker.count_marginal_gain_call()
 
     if not current_set:
-        tracker.count_gain_call()
+        # g(e|∅) = g({e})
+        tracker.count_singleton_gain_call()
         return gain_fn([element])
 
     # g(S ∪ {I^M})
     tracker.count_set_operation()  # Union operation
-    tracker.count_gain_call()
+    tracker.count_gain_call("union")
     gain_with = gain_fn(current_set + [element])
 
     # g(S)
-    tracker.count_gain_call()
+    tracker.count_gain_call("current_set")
     gain_without = gain_fn(current_set)
 
     return gain_with - gain_without
@@ -87,7 +113,7 @@ def tracked_marginal_gain(element, current_set, gain_fn, tracker):
 
 def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     """
-    Greedy Search following Algorithm GS with operation tracking.
+    Greedy Search following Algorithm GS with CORRECT operation tracking.
     """
     tracker = OperationTracker("Greedy Search (GS)")
     print("Greedy: Starting Algorithm GS with tracking")
@@ -104,16 +130,23 @@ def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
     U = list(V)
     tracker.count_set_operation()  # Copy operation
 
+    outer_iteration = 0
+
     # Line 4: repeat
     while True:
         tracker.count_iteration()
+        outer_iteration += 1
+
+        print(f"Greedy: Outer iteration {outer_iteration}, |U|={len(U)}, |S|={len(S)}")
 
         # Line 5: I_t^M ← arg max_{I^M ∈ U} g(I^M|S + I^M)/c(I^M)
+        # KEY: Greedy phải tính marginal gain cho TẤT CẢ regions trong U mỗi iteration
         best_region = None
         best_density = -1
 
-        for I_M in U:  # Iterate through remaining regions
-            # Calculate g(I^M|S)
+        # This is the expensive part - for each remaining region
+        for I_M in U:  # |U| regions
+            # Calculate g(I^M|S) - này là marginal gain expensive
             marginal_g = tracked_marginal_gain(I_M, S, gain_fn, tracker)
 
             # Calculate c(I^M)
@@ -128,6 +161,7 @@ def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
                     best_region = I_M
 
         if best_region is None:
+            print("Greedy: No more valid regions found")
             break
 
         # Line 6: if c(S + I_t^M) ≤ B then
@@ -147,7 +181,9 @@ def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
             # Line 7: S = S + I_t^M
             tracker.count_set_operation()  # Union operation
             S.append(best_region)
+            print(f"Greedy: Added region {best_region['id']}, density={best_density:.3f}")
         else:
+            print("Greedy: Budget constraint violated, stopping")
             break
 
         # Line 8: U ← U \ {I_t^M}
@@ -156,11 +192,16 @@ def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
 
         # Line 9: until U = ∅
         if not U:
+            print("Greedy: All regions processed")
             break
 
     # Final gain calculation
     tracker.count_gain_call()
     total_gain = gain_fn(S) if S else 0
+
+    # Add detailed complexity analysis
+    total_regions_processed = sum(len(U) - i for i in range(len(S)))  # Approximate
+    print(f"Greedy: Processed ~{total_regions_processed} region comparisons across {outer_iteration} iterations")
 
     tracker.print_summary()
 
@@ -231,7 +272,7 @@ def OT_Algorithm_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
                 S_prime.append(I_M)
 
         # Line 9: I* = arg max_{I* ∈ {I*,I^M}} g(I*)
-        tracker.count_gain_call()
+        tracker.count_singleton_gain_call()
         singleton_gain = gain_fn([I_M])
 
         tracker.count_comparison()
@@ -252,11 +293,18 @@ def OT_Algorithm_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
     if I_star:
         tracker.count_cost_call()
 
-    # Calculate final gains
-    tracker.count_gain_call()
-    gain_S = gain_fn(S) if S else 0
-    tracker.count_gain_call()
-    gain_S_prime = gain_fn(S_prime) if S_prime else 0
+    # Calculate final gains for decision making
+    if S:
+        tracker.count_gain_call("current_set")
+        gain_S = gain_fn(S)
+    else:
+        gain_S = 0
+
+    if S_prime:
+        tracker.count_gain_call("current_set")
+        gain_S_prime = gain_fn(S_prime)
+    else:
+        gain_S_prime = 0
 
     # Final selection logic (Lines 10-18)
     candidates = []

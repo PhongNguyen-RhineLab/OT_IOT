@@ -1,351 +1,483 @@
-import argparse
-import time
-import tracemalloc
 import numpy as np
-import pandas as pd
-import torch
-import torchvision
-import torchvision.transforms as transforms
-from torchvision.models import resnet18, ResNet18_Weights
-from torchvision.datasets import (
-    CIFAR10, CIFAR100, STL10,
-    MNIST, FashionMNIST, ImageFolder
-)
-
-from tracked_algorithms import Greedy_Search_Tracked, OT_Algorithm_Tracked, IOT_Algorithm_Tracked
-from gradcam import gradcam
-from submodular_function import create_gain_function
+from image_division import image_division
 
 
-# Enhanced benchmark with operation tracking
-def benchmark_with_tracking(func, *args, **kwargs):
-    """Benchmark with runtime, memory and operation tracking"""
-    tracemalloc.start()
-    start = time.time()
+class OperationTracker:
+    """Track operations and function calls for algorithm analysis"""
 
-    result, aux_data = func(*args, **kwargs)
+    def __init__(self, algorithm_name):
+        self.algorithm_name = algorithm_name
+        self.reset()
 
-    runtime = time.time() - start
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    def reset(self):
+        # Separate tracking for different types of gain function calls
+        self.gain_function_calls = 0  # g(S) calls
+        self.marginal_gain_calls = 0  # g(e|S) calls (computed as g(S∪{e}) - g(S))
+        self.singleton_gain_calls = 0  # g({e}) calls
 
-    # Extract operation summary
-    operation_summary = aux_data.get('operation_summary', {})
+        # Detailed breakdown of gain calls in marginal computation
+        self.gain_union_calls = 0  # g(S ∪ {e}) calls
+        self.gain_current_set_calls = 0  # g(S) calls in marginal computation
 
-    return result, runtime, peak / 1024, operation_summary, aux_data
+        self.cost_function_calls = 0
+        self.set_operations = 0  # Union, intersection, etc.
+        self.comparisons = 0
+        self.iterations = 0
+        self.threshold_checks = 0
 
+    def count_gain_call(self, call_type="general"):
+        """Count gain function calls with type specification"""
+        self.gain_function_calls += 1
+        if call_type == "union":
+            self.gain_union_calls += 1
+        elif call_type == "current_set":
+            self.gain_current_set_calls += 1
 
-# ----------------- Memory calculation helper ----------------- #
-def calculate_sizeof_subregion(sample_region):
-    """Calculate size of one subregion in KB"""
-    size_bytes = 0
+    def count_marginal_gain_call(self):
+        """Count when we compute a marginal gain g(e|S)"""
+        self.marginal_gain_calls += 1
 
-    if 'mask' in sample_region:
-        mask = sample_region['mask']
-        size_bytes += mask.nbytes
+    def count_singleton_gain_call(self):
+        """Count when we compute g({e})"""
+        self.singleton_gain_calls += 1
 
-    if 'saliency' in sample_region:
-        saliency = sample_region['saliency']
-        size_bytes += saliency.nbytes
+    def count_cost_call(self):
+        self.cost_function_calls += 1
 
-    if 'image' in sample_region:
-        image = sample_region['image']
-        if isinstance(image, np.ndarray):
-            size_bytes += image.nbytes
-        else:
-            size_bytes += 224 * 224 * 3 * 4
+    def count_set_operation(self):
+        self.set_operations += 1
 
-    size_bytes += 64
-    return size_bytes / 1024
+    def count_comparison(self):
+        self.comparisons += 1
 
+    def count_iteration(self):
+        self.iterations += 1
 
-def calculate_theoretical_memory(algorithm, num_images, m_per_image, solution_set,
-                                 sample_subregion, aux_data=None):
-    """Calculate theoretical memory usage"""
-    sizeof_subregion = calculate_sizeof_subregion(sample_subregion)
+    def count_threshold_check(self):
+        self.threshold_checks += 1
 
-    if algorithm == "Greedy":
-        memory = (num_images * m_per_image + len(solution_set)) * sizeof_subregion
+    def get_summary(self):
+        return {
+            'algorithm': self.algorithm_name,
+            'total_gain_calls': self.gain_function_calls,
+            'marginal_gain_calls': self.marginal_gain_calls,
+            'singleton_gain_calls': self.singleton_gain_calls,
+            'gain_union_calls': self.gain_union_calls,
+            'gain_current_set_calls': self.gain_current_set_calls,
+            'cost_calls': self.cost_function_calls,
+            'set_operations': self.set_operations,
+            'comparisons': self.comparisons,
+            'iterations': self.iterations,
+            'threshold_checks': self.threshold_checks,
+            'total_oracle_calls': self.gain_function_calls + self.singleton_gain_calls
+        }
 
-    elif algorithm == "OT":
-        S_size = aux_data.get('S_size', 0) if aux_data else 0
-        S_prime_size = aux_data.get('S_prime_size', 0) if aux_data else 0
-        I_star_size = 1 if aux_data and aux_data.get('has_I_star', False) else 0
-
-        memory = m_per_image * sizeof_subregion + (S_size + S_prime_size + I_star_size) * sizeof_subregion
-
-    elif algorithm == "IOT":
-        S_size = aux_data.get('S_size', 0) if aux_data else 0
-        S_prime_size = aux_data.get('S_prime_size', 0) if aux_data else 0
-        I_star_size = 1 if aux_data and aux_data.get('has_I_star', False) else 0
-
-        max_S_tau = aux_data.get('max_S_tau_size', 0) if aux_data else 0
-        max_S_prime_tau = aux_data.get('max_S_prime_tau_size', 0) if aux_data else 0
-        S_b_size = aux_data.get('S_b_size', 0) if aux_data else 0
-
-        memory = (m_per_image * sizeof_subregion +
-                  (S_size + S_prime_size + I_star_size) * sizeof_subregion +
-                  (max_S_tau + max_S_prime_tau + S_b_size) * sizeof_subregion)
-    else:
-        memory = 0
-
-    return memory
-
-
-def benchmark_with_theoretical_memory(func, algorithm, num_images, m_per_image, *args, **kwargs):
-    """Benchmark with both runtime, operation tracking and theoretical memory calculation"""
-    start = time.time()
-    result, aux_memory_data = func(*args, **kwargs)
-    runtime = time.time() - start
-
-    # Extract operation summary
-    operation_summary = aux_memory_data.get('operation_summary', {})
-
-    # Extract solution and sample subregion for memory calculation
-    if result and len(result) >= 2 and isinstance(result[0], list):
-        solution_set = result[0]
-        sample_subregion = solution_set[0] if solution_set else None
-    else:
-        solution_set = []
-        sample_subregion = None
-
-    # Calculate theoretical memory if we have sample
-    if sample_subregion:
-        theoretical_memory = calculate_theoretical_memory(
-            algorithm, num_images, m_per_image, solution_set, sample_subregion, aux_memory_data
-        )
-    else:
-        theoretical_memory = 0
-
-    return result, runtime, theoretical_memory, operation_summary, aux_memory_data
+    def print_summary(self):
+        summary = self.get_summary()
+        print(f"\n=== {self.algorithm_name} DETAILED OPERATION SUMMARY ===")
+        print(f"Total g(·) function calls: {summary['total_gain_calls']}")
+        print(f"  ├── g(S ∪ {{e}}) calls: {summary['gain_union_calls']}")
+        print(f"  ├── g(S) calls: {summary['gain_current_set_calls']}")
+        print(
+            f"  └── Other g(·) calls: {summary['total_gain_calls'] - summary['gain_union_calls'] - summary['gain_current_set_calls']}")
+        print(f"Marginal gain g(e|S) computations: {summary['marginal_gain_calls']}")
+        print(f"Singleton g({{e}}) calls: {summary['singleton_gain_calls']}")
+        print(f"Total oracle calls: {summary['total_oracle_calls']}")
+        print(f"Cost function calls: {summary['cost_calls']}")
+        print(f"Set operations (∪, ∩, \\): {summary['set_operations']}")
+        print(f"Comparisons: {summary['comparisons']}")
+        print(f"Iterations: {summary['iterations']}")
+        print(f"Threshold checks: {summary['threshold_checks']}")
 
 
-# ----------------- Cost & Gain ----------------- #
-def cost_fn(region_or_list):
-    """Handle both single region and list of regions"""
-    if isinstance(region_or_list, list):
-        if not region_or_list:
-            return 0
-        total_cost = 0
-        for region in region_or_list:
-            total_cost += region["mask"].sum()
-        return total_cost
-    else:
-        return region_or_list["mask"].sum()
+def tracked_marginal_gain(element, current_set, gain_fn, tracker):
+    """Calculate marginal gain with detailed tracking: g(I^M|S) = g(S ∪ {I^M}) - g(S)"""
+    tracker.count_marginal_gain_call()
+
+    if not current_set:
+        # g(e|∅) = g({e})
+        tracker.count_singleton_gain_call()
+        return gain_fn([element])
+
+    # g(S ∪ {I^M})
+    tracker.count_set_operation()  # Union operation
+    tracker.count_gain_call("union")
+    gain_with = gain_fn(current_set + [element])
+
+    # g(S)
+    tracker.count_gain_call("current_set")
+    gain_without = gain_fn(current_set)
+
+    return gain_with - gain_without
 
 
-def simple_gain_fn(region_or_list):
-    """Handle both single region and list of regions"""
-    if isinstance(region_or_list, list):
-        if not region_or_list:
-            return 0
-        total_gain = 0
-        for region in region_or_list:
-            total_gain += (region["saliency"] * region["mask"]).sum()
-        return total_gain
-    else:
-        return (region_or_list["saliency"] * region_or_list["mask"]).sum()
+def Greedy_Search_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
+    """
+    Greedy Search following Algorithm GS with CORRECT operation tracking.
+    """
+    tracker = OperationTracker("Greedy Search (GS)")
+    print("Greedy: Starting Algorithm GS with tracking")
 
+    # Line 1: V ← ID(I, N, A, m)
+    V = image_division(images, saliency_maps, N, m)
+    n = len(V)
+    print(f"Greedy: Generated {n} subregions")
 
-def build_base_transform(weights):
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    try:
-        meta = getattr(weights, "meta", {})
-        mean = meta.get("mean", mean)
-        std = meta.get("std", std)
-    except Exception:
-        pass
-    return mean, std
+    # Line 2: S ← ∅
+    S = []
 
+    # Line 3: U ← V
+    U = list(V)
+    tracker.count_set_operation()  # Copy operation
 
-def load_dataset(name: str, weights, root: str, num_samples: int):
-    mean, std = build_base_transform(weights)
+    outer_iteration = 0
 
-    def pipeline(extra=None):
-        ops = [transforms.Resize((224, 224))]
-        if extra:
-            ops.extend(extra)
-        ops += [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
-        return transforms.Compose(ops)
+    # Line 4: repeat
+    while True:
+        tracker.count_iteration()
+        outer_iteration += 1
 
-    if name == "cifar10":
-        ds = CIFAR10(root=root, train=False, download=True, transform=pipeline())
-    elif name == "cifar100":
-        ds = CIFAR100(root=root, train=False, download=True, transform=pipeline())
-    elif name == "stl10":
-        ds = STL10(root=root, split="test", download=True, transform=pipeline())
-    elif name == "mnist":
-        ds = MNIST(root=root, train=False, download=True,
-                   transform=pipeline([transforms.Grayscale(num_output_channels=3)]))
-    elif name == "fashionmnist":
-        ds = FashionMNIST(root=root, train=False, download=True,
-                          transform=pipeline([transforms.Grayscale(num_output_channels=3)]))
-    elif name == "imagenet":
-        if not root:
-            raise ValueError("Provide --data-root pointing to ImageNet split directory.")
-        try:
-            tf = weights.transforms()
-            if not hasattr(tf, "__call__"):
-                raise RuntimeError
-            ds = ImageFolder(root=root, transform=tf)
-        except Exception:
-            ds = ImageFolder(root=root, transform=pipeline())
-    else:
-        raise ValueError(f"Unsupported dataset: {name}")
+        print(f"Greedy: Outer iteration {outer_iteration}, |U|={len(U)}, |S|={len(S)}")
 
-    loader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True)
-    images, saliency_maps = [], []
-    for img, _ in loader:
-        cam = gradcam(model, img)
-        images.append(img[0].permute(1, 2, 0).numpy())
-        saliency_maps.append(cam)
-        if len(images) >= num_samples:
+        # Line 5: I_t^M ← arg max_{I^M ∈ U} g(I^M|S + I^M)/c(I^M)
+        # KEY: Greedy phải tính marginal gain cho TẤT CẢ regions trong U mỗi iteration
+        best_region = None
+        best_density = -1
+
+        # This is the expensive part - for each remaining region
+        for I_M in U:  # |U| regions
+            # Calculate g(I^M|S) - này là marginal gain expensive
+            marginal_g = tracked_marginal_gain(I_M, S, gain_fn, tracker)
+
+            # Calculate c(I^M)
+            tracker.count_cost_call()
+            cost = cost_fn(I_M)
+
+            if cost > 0:
+                density = marginal_g / cost
+                tracker.count_comparison()
+                if density > best_density:
+                    best_density = density
+                    best_region = I_M
+
+        if best_region is None:
+            print("Greedy: No more valid regions found")
             break
-    return images, saliency_maps
 
+        # Line 6: if c(S + I_t^M) ≤ B then
+        # Calculate current cost c(S)
+        current_cost = 0
+        for x in S:
+            tracker.count_cost_call()
+            current_cost += cost_fn(x)
 
-# ----------------- Main ----------------- #
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="cifar10",
-                        choices=["cifar10", "cifar100", "stl10",
-                                 "mnist", "fashionmnist", "imagenet"])
-    parser.add_argument("--data-root", default="./data",
-                        help="Root folder (used for downloads or ImageNet path).")
-    parser.add_argument("--num-samples", type=int, default=10)
-    parser.add_argument("--budgets", type=int, nargs="+", default=[2000, 4000, 8000])
-    parser.add_argument("--epsilons", type=float, nargs="+", default=[0.1, 0.3])
-    parser.add_argument("--use-submodular", action="store_true",
-                        help="Use full submodular function instead of simple saliency")
-    parser.add_argument("--m", type=int, default=5, help="Number of subregions per image")
-    args = parser.parse_args()
+        # Calculate c(I_t^M)
+        tracker.count_cost_call()
+        new_region_cost = cost_fn(best_region)
 
-    weights = ResNet18_Weights.DEFAULT
-    model = resnet18(weights=weights)
-    model.eval()
-
-    images, saliency_maps = load_dataset(
-        args.dataset, weights, args.data_root, args.num_samples
-    )
-
-    # Choose gain function (keep original logic)
-    if args.use_submodular:
-        print("Using full submodular function (4 components)")
-        feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
-        feature_extractor.eval()
-
-        gain_fn = create_gain_function(
-            model=model,
-            feature_extractor=feature_extractor,
-            original_images=images,
-            lambda1=1.0, lambda2=1.0, lambda3=1.0, lambda4=1.0
-        )
-    else:
-        print("Using simple saliency-based gain function")
-        gain_fn = simple_gain_fn
-
-    results = []
-    operation_results = []
-
-    for B in args.budgets:
-        print(f"\n=== Budget: {B} ===")
-
-        # Greedy Search
-        print("Running Greedy Search...")
-        (S_gs, g_gs), t_gs, mem_gs, ops_gs, aux_gs = benchmark_with_theoretical_memory(
-            Greedy_Search_Tracked, "Greedy", args.num_samples, args.m,
-            images, saliency_maps, N=4, m=args.m,
-            budget=B, cost_fn=cost_fn, gain_fn=gain_fn
-        )
-        results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs, mem_gs])
-        operation_results.append(["Greedy", B, ops_gs.get('total_oracle_calls', 0),
-                                  ops_gs.get('gain_calls', 0), ops_gs.get('marginal_gain_calls', 0),
-                                  ops_gs.get('threshold_checks', 0), ops_gs.get('iterations', 0)])
-        print(f"Greedy: |S|={len(S_gs)}, g(S)={g_gs:.3f}, time={t_gs:.3f}s, mem={mem_gs:.1f}KB")
-        print(f"        Oracle calls: {ops_gs.get('total_oracle_calls', 0)}")
-
-        # OT Algorithm
-        print("Running OT Algorithm...")
-        (S_ot, g_ot), t_ot, mem_ot, ops_ot, aux_ot = benchmark_with_theoretical_memory(
-            OT_Algorithm_Tracked, "OT", args.num_samples, args.m,
-            images, saliency_maps, N=4, m=args.m,
-            budget=B, cost_fn=cost_fn, gain_fn=gain_fn
-        )
-        results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot, mem_ot])
-        operation_results.append(["OT", B, ops_ot.get('total_oracle_calls', 0),
-                                  ops_ot.get('gain_calls', 0), ops_ot.get('marginal_gain_calls', 0),
-                                  ops_ot.get('threshold_checks', 0), ops_ot.get('iterations', 0)])
-        print(f"OT: |S|={len(S_ot)}, g(S)={g_ot:.3f}, time={t_ot:.3f}s, mem={mem_ot:.1f}KB")
-        print(f"    Oracle calls: {ops_ot.get('total_oracle_calls', 0)}")
-
-        # IOT Algorithm
-        for eps in args.epsilons:
-            print(f"Running IOT Algorithm (ε={eps})...")
-            (S_iot, g_iot), t_iot, mem_iot, ops_iot, aux_iot = benchmark_with_theoretical_memory(
-                IOT_Algorithm_Tracked, "IOT", args.num_samples, args.m,
-                images, saliency_maps, N=4, m=args.m,
-                budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
-            )
-            results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot, mem_iot])
-            operation_results.append(["IOT", B, ops_iot.get('total_oracle_calls', 0),
-                                      ops_iot.get('gain_calls', 0), ops_iot.get('marginal_gain_calls', 0),
-                                      ops_iot.get('threshold_checks', 0), ops_iot.get('iterations', 0)])
-            print(f"IOT (ε={eps}): |S|={len(S_iot)}, g(S)={g_iot:.3f}, time={t_iot:.3f}s, mem={mem_iot:.1f}KB")
-            print(f"               Oracle calls: {ops_iot.get('total_oracle_calls', 0)}")
-
-    # Create results DataFrames
-    df_results = pd.DataFrame(results, columns=[
-        "Algorithm", "Dataset", "Budget", "Epsilon", "SetSize", "Gain", "Time(s)", "Memory(KB)"
-    ])
-
-    df_operations = pd.DataFrame(operation_results, columns=[
-        "Algorithm", "Budget", "Total_Oracle_Calls", "Gain_Calls", "Marginal_Gain_Calls",
-        "Threshold_Checks", "Iterations"
-    ])
-
-    # Save results
-    suffix = "_submodular" if args.use_submodular else "_simple"
-    results_file = f"experiment_results{suffix}.csv"
-    operations_file = f"operation_analysis{suffix}.csv"
-
-    df_results.to_csv(results_file, index=False)
-    df_operations.to_csv(operations_file, index=False)
-
-    print(f"\nSaved results to {results_file}")
-    print(f"Saved operation analysis to {operations_file}")
-
-    # Display final results
-    print(f"\n=== FINAL RESULTS ===")
-    print(df_results)
-
-    print(f"\n=== OPERATION ANALYSIS ===")
-    print(df_operations)
-
-    # Theoretical vs Actual Complexity Analysis
-    print(f"\n=== COMPLEXITY ANALYSIS ===")
-    n = args.num_samples * args.m  # Total regions
-
-    print(f"Total regions (n): {n}")
-    print(f"Algorithm    | Actual Oracle Calls | Theoretical | Ratio")
-    print(f"-------------|-------------------|-------------|-------")
-
-    for _, row in df_operations.iterrows():
-        alg = row['Algorithm']
-        oracle_calls = row['Total_Oracle_Calls']
-
-        if alg == "Greedy":
-            theoretical = n ** 2  # O(n^2) worst case
-            theoretical_str = f"O(n²) ≈ {theoretical}"
-        elif alg == "OT":
-            theoretical = 3 * n  # 3n as per paper
-            theoretical_str = f"3n ≈ {theoretical}"
-        elif alg == "IOT":
-            theoretical = 5 * n  # 5n as per paper
-            theoretical_str = f"5n ≈ {theoretical}"
+        # Check budget constraint
+        tracker.count_comparison()
+        if current_cost + new_region_cost <= budget:
+            # Line 7: S = S + I_t^M
+            tracker.count_set_operation()  # Union operation
+            S.append(best_region)
+            print(f"Greedy: Added region {best_region['id']}, density={best_density:.3f}")
         else:
-            theoretical = 0
-            theoretical_str = "Unknown"
+            print("Greedy: Budget constraint violated, stopping")
+            break
 
-        ratio = oracle_calls / theoretical if theoretical > 0 else 0
-        print(f"{alg:12s} | {oracle_calls:17d} | {theoretical_str:11s} | {ratio:.2f}")
+        # Line 8: U ← U \ {I_t^M}
+        tracker.count_set_operation()  # Set difference operation
+        U.remove(best_region)
+
+        # Line 9: until U = ∅
+        if not U:
+            print("Greedy: All regions processed")
+            break
+
+    # Final gain calculation
+    tracker.count_gain_call()
+    total_gain = gain_fn(S) if S else 0
+
+    # Add detailed complexity analysis
+    total_regions_processed = sum(len(U) - i for i in range(len(S)))  # Approximate
+    print(f"Greedy: Processed ~{total_regions_processed} region comparisons across {outer_iteration} iterations")
+
+    tracker.print_summary()
+
+    # Memory aux data
+    memory_aux = {'operation_summary': tracker.get_summary()}
+
+    return (S, total_gain), memory_aux
+
+
+def OT_Algorithm_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
+    """
+    OT Algorithm following Algorithm 2 with operation tracking.
+    Compatible with original function signature.
+    """
+    tracker = OperationTracker("Online Threshold (OT)")
+    print("OT: Starting Algorithm 2 with tracking")
+
+    V = image_division(images, saliency_maps, N, m)
+    n = len(V)
+
+    # Line 1: V, S, S', I* ← ∅
+    S, S_prime, I_star = [], [], None
+    I_star_gain = 0
+
+    # Line 2: for an incoming image I do (streaming simulation)
+    for I_M in V:
+        tracker.count_iteration()
+
+        # Skip infeasible regions early
+        tracker.count_cost_call()
+        if cost_fn(I_M) > budget:
+            continue
+
+        # Line 5: for each region I^M ∈ V \ {S + S'} do
+        tracker.count_set_operation()  # Check membership S + S'
+        if I_M in S or I_M in S_prime:
+            continue
+
+        # Line 6: S_d ← arg max_{S_d ∈ {S,S'}} g(I^M|S_d)
+        marginal_S = tracked_marginal_gain(I_M, S, gain_fn, tracker)
+        marginal_S_prime = tracked_marginal_gain(I_M, S_prime, gain_fn, tracker)
+
+        tracker.count_comparison()
+        if marginal_S >= marginal_S_prime:
+            S_d = S
+            marginal_g = marginal_S
+            is_S = True
+        else:
+            S_d = S_prime
+            marginal_g = marginal_S_prime
+            is_S = False
+
+        # Line 7: if g(I^M|S_d)/c(I^M) ≥ g(S_d)/B then
+        tracker.count_cost_call()
+        region_cost = cost_fn(I_M)
+
+        tracker.count_gain_call()
+        current_gain = gain_fn(S_d)
+
+        tracker.count_threshold_check()
+        tracker.count_comparison()
+        if region_cost > 0 and marginal_g / region_cost >= current_gain / budget:
+            # Line 8: S_d = S_d + I^M
+            tracker.count_set_operation()  # Union operation
+            if is_S:
+                S.append(I_M)
+            else:
+                S_prime.append(I_M)
+
+        # Line 9: I* = arg max_{I* ∈ {I*,I^M}} g(I*)
+        tracker.count_singleton_gain_call()
+        singleton_gain = gain_fn([I_M])
+
+        tracker.count_comparison()
+        if I_star is None or singleton_gain > I_star_gain:
+            I_star = I_M
+            I_star_gain = singleton_gain
+
+    # Lines 10-19: Final selection
+    # Calculate costs
+    S_cost = sum(cost_fn(x) for x in S)
+    S_prime_cost = sum(cost_fn(x) for x in S_prime)
+    I_star_cost = cost_fn(I_star) if I_star else float('inf')
+
+    for x in S:
+        tracker.count_cost_call()
+    for x in S_prime:
+        tracker.count_cost_call()
+    if I_star:
+        tracker.count_cost_call()
+
+    # Calculate final gains for decision making
+    if S:
+        tracker.count_gain_call("current_set")
+        gain_S = gain_fn(S)
+    else:
+        gain_S = 0
+
+    if S_prime:
+        tracker.count_gain_call("current_set")
+        gain_S_prime = gain_fn(S_prime)
+    else:
+        gain_S_prime = 0
+
+    # Final selection logic (Lines 10-18)
+    candidates = []
+
+    tracker.count_comparison()
+    tracker.count_comparison()
+    if S_cost <= budget and S_prime_cost <= budget:
+        # Line 11
+        candidates = [(S, gain_S), (S_prime, gain_S_prime)]
+        if I_star_cost <= budget:
+            candidates.append(([I_star], I_star_gain))
+        tracker.count_comparison()
+        S_star, g_star = max(candidates, key=lambda x: x[1])
+    else:
+        # Handle infeasible cases (simplified for brevity)
+        if S_cost <= budget:
+            S_star, g_star = S, gain_S
+        elif S_prime_cost <= budget:
+            S_star, g_star = S_prime, gain_S_prime
+        elif I_star_cost <= budget:
+            S_star, g_star = [I_star], I_star_gain
+        else:
+            S_star, g_star = [], 0
+
+    tracker.print_summary()
+
+    memory_aux = {
+        'S_size': len(S),
+        'S_prime_size': len(S_prime),
+        'has_I_star': I_star is not None,
+        'operation_summary': tracker.get_summary()
+    }
+
+    return (S_star, g_star), memory_aux
+
+
+def IOT_Algorithm_Tracked(images, saliency_maps, N, m, budget, eps, cost_fn, gain_fn):
+    """
+    IOT Algorithm following Algorithm 3 with operation tracking.
+    """
+    tracker = OperationTracker("Improved Online Threshold (IOT)")
+    print("IOT: Starting Algorithm 3 with tracking")
+
+    # Line 2: ε' = ε/5
+    eps_prime = eps / 5
+
+    # Line 3: S_b, M ← OT(N, A, m, B) - First stream
+    (S_b, M), ot_memory = OT_Algorithm_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
+
+    # Add OT operations to IOT tracker
+    ot_summary = ot_memory['operation_summary']
+    tracker.gain_function_calls += ot_summary['gain_calls']
+    tracker.marginal_gain_calls += ot_summary['marginal_gain_calls']
+    tracker.cost_function_calls += ot_summary['cost_calls']
+    tracker.set_operations += ot_summary['set_operations']
+    tracker.comparisons += ot_summary['comparisons']
+    tracker.threshold_checks += ot_summary['threshold_checks']
+
+    # Line 4: Generate threshold set T
+    T = []
+    lower_bound = (1 - eps_prime) * eps_prime * M / (2 * budget)
+    upper_bound = 4 * M / (eps_prime * budget)
+
+    # Generate thresholds (simplified)
+    num_thresholds = min(10, max(3, int(5 / eps_prime)))  # Reasonable number
+    if lower_bound < upper_bound:
+        ratio = (upper_bound / lower_bound) ** (1.0 / (num_thresholds - 1))
+        tau = lower_bound
+        for i in range(num_thresholds):
+            if tau > upper_bound:
+                break
+            T.append(tau)
+            tau *= ratio
+    else:
+        T = [lower_bound]
+
+    print(f"IOT: Using {len(T)} thresholds")
+
+    # Initialize candidates for each threshold
+    candidates = {}
+    for tau in T:
+        candidates[tau] = {'S_tau': [], 'S_prime_tau': []}
+
+    # Line 5-7: Second stream
+    V = image_division(images, saliency_maps, N, m)
+
+    for I_M in V:
+        tracker.count_iteration()
+
+        # Line 8: for each unconsidered region I^M ∈ V do
+        # Line 9: for each τ ∈ T do
+        for tau in T:
+            S_tau = candidates[tau]['S_tau']
+            S_prime_tau = candidates[tau]['S_prime_tau']
+
+            # Line 10: X_τ ← arg max_{X_τ ∈ {S_τ,S'_τ}} g(I^M|X_τ)
+            marginal_S_tau = tracked_marginal_gain(I_M, S_tau, gain_fn, tracker)
+            marginal_S_prime_tau = tracked_marginal_gain(I_M, S_prime_tau, gain_fn, tracker)
+
+            tracker.count_comparison()
+            if marginal_S_tau >= marginal_S_prime_tau:
+                X_tau = S_tau
+                target_key = 'S_tau'
+                marginal_g = marginal_S_tau
+            else:
+                X_tau = S_prime_tau
+                target_key = 'S_prime_tau'
+                marginal_g = marginal_S_prime_tau
+
+            # Line 11: if g(I^M|X_τ)/c(I^M) ≥ τ ∧ c(X_τ) ≤ B then
+            tracker.count_cost_call()
+            region_cost = cost_fn(I_M)
+
+            current_cost = sum(cost_fn(x) for x in X_tau)
+            for x in X_tau:
+                tracker.count_cost_call()
+
+            tracker.count_threshold_check()
+            tracker.count_comparison()
+            tracker.count_comparison()
+            if (region_cost > 0 and
+                    marginal_g / region_cost >= tau and
+                    current_cost + region_cost <= budget):
+                # Line 12: X_τ = X_τ + I^M
+                tracker.count_set_operation()
+                candidates[tau][target_key] = X_tau + [I_M]
+
+    # Line 13-15: Final selection
+    all_candidates = [S_b]
+
+    for tau in T:
+        S_tau = candidates[tau]['S_tau']
+        S_prime_tau = candidates[tau]['S_prime_tau']
+
+        # Check feasibility
+        S_tau_cost = sum(cost_fn(x) for x in S_tau)
+        S_prime_tau_cost = sum(cost_fn(x) for x in S_prime_tau)
+
+        for x in S_tau:
+            tracker.count_cost_call()
+        for x in S_prime_tau:
+            tracker.count_cost_call()
+
+        tracker.count_comparison()
+        if S_tau_cost <= budget:
+            all_candidates.append(S_tau)
+        tracker.count_comparison()
+        if S_prime_tau_cost <= budget:
+            all_candidates.append(S_prime_tau)
+
+    # Evaluate candidates
+    if not all_candidates:
+        S_star, g_star = [], 0
+    else:
+        candidate_gains = []
+        for candidate in all_candidates:
+            tracker.count_gain_call()
+            gain = gain_fn(candidate) if candidate else 0
+            candidate_gains.append((candidate, gain))
+
+        tracker.count_comparison()
+        S_star, g_star = max(candidate_gains, key=lambda x: x[1])
+
+    tracker.print_summary()
+
+    memory_aux = {
+        'S_size': ot_memory['S_size'],
+        'S_prime_size': ot_memory['S_prime_size'],
+        'has_I_star': ot_memory['has_I_star'],
+        'max_S_tau_size': max(len(candidates[tau]['S_tau']) for tau in T),
+        'max_S_prime_tau_size': max(len(candidates[tau]['S_prime_tau']) for tau in T),
+        'S_b_size': len(S_b),
+        'operation_summary': tracker.get_summary()
+    }
+
+    return (S_star, g_star), memory_aux
