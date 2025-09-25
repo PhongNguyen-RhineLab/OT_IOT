@@ -1,213 +1,150 @@
-# Online Approximation Algorithms for Object Detection under Budget Allocation
+# Online Algorithms for Object Detection under Budget Allocation
 
-This repository implements online approximation algorithms for submodular maximization under budget constraints, specifically designed for object detection tasks. The project includes three main algorithms: Greedy Search, OT (Online Threshold), and IOT (Improved Online Threshold) algorithms.
+This repository contains the implementation of online algorithms for object detection under budget constraints, as described in the paper "Online approximate algorithms for Object detection under Budget allocation"
 
 ## Overview
 
-The project addresses the problem of selecting optimal image subregions for object detection under computational budget constraints. It uses submodular optimization techniques to maximize detection performance while staying within memory and computational limits.
+The project implements three main algorithms for selecting optimal image subregions under budget constraints:
+- **Greedy Search (GS)**: Algorithm 4 from the paper
+- **Online Threshold (OT)**: Online algorithm with threshold-based selection  
+- **Improved Online Threshold (IOT)**: Enhanced version with ε-approximation
 
 ## Features
 
-- **Three Optimization Algorithms**:
-  - Greedy Search: Classic greedy approach for submodular maximization
-  - OT Algorithm: Ultra-fast online threshold algorithm
-  - IOT Algorithm: Improved online threshold with better approximation guarantees
-
-- **Advanced Saliency Detection**:
-  - Grad-CAM integration for generating attention maps
-  - Support for various CNN architectures (ResNet18 by default)
-
-- **Comprehensive Submodular Function**:
-  - Confidence score using Evidential Deep Learning
-  - Effectiveness measurement
-  - Consistency evaluation
-  - Collaboration assessment
-
-- **Multi-Dataset Support**:
-  - CIFAR-10/100
-  - STL-10
-  - MNIST
-  - Fashion-MNIST
-  - ImageNet (custom path)
-
-- **Performance Monitoring**:
-  - Runtime benchmarking
-  - Theoretical memory usage calculation
-  - Comparative analysis between algorithms
-
-## Installation
-
-### Requirements
-
-```bash
-pip install torch torchvision numpy pandas opencv-python scikit-learn
-```
-
-### Dependencies
-
-- Python 3.8+
-- PyTorch 1.9+
-- torchvision
-- numpy
-- pandas
-- opencv-python
-- scikit-learn
+- **Multiple Dataset Support**: CIFAR-10, CIFAR-100, STL-10, MNIST, FashionMNIST
+- **Flexible Cost/Gain Functions**: Both simple saliency-based and full 4-component submodular functions
+- **Performance Tracking**: Memory usage, operation counts, and runtime analysis
+- **Budget Constraint Testing**: Multiple budget levels for comprehensive evaluation
+- **Automated Experiments**: Complete experimental pipeline with CSV output
 
 ## Project Structure
 
 ```
-OT_IOT/
-├── run_experiments.py      # Main experiment runner
-├── greedy_search.py        # Greedy algorithm implementation
-├── ot_algo.py             # Online Threshold algorithm
-├── iot_algo.py            # Improved Online Threshold algorithm
-├── gradcam.py             # Grad-CAM saliency generation
-├── image_division.py      # Image patch division utilities
-├── submodular_function.py # Submodular function implementation
-└── README.md              # This file
+├── main_experiments.py      # Main experiment runner
+├── paper_algorithms.py      # Core algorithm implementations (GS, OT, IOT)
+├── dataset_loader.py        # Dataset loading and saliency map generation
+├── image_division.py        # Algorithm ID - Image division into subregions
+├── cost_gain_functions.py   # Cost and gain function implementations
+├── operation_tracker.py     # Performance and operation tracking
+├── memory_calculator.py     # Memory usage calculation
+└── README.md                # This file
+```
+
+## Installation
+
+### Prerequisites
+- Python 3.7+
+- PyTorch
+- torchvision
+- numpy
+- pandas
+
+### Setup
+```bash
+# Clone the repository
+git clone <repository-url>
+cd OT_IOT
+
+# Install required packages
+pip install torch torchvision numpy pandas
 ```
 
 ## Usage
 
 ### Basic Usage
-
 Run experiments with default parameters:
-
 ```bash
 python main_experiments.py
 ```
 
 ### Advanced Usage
-
+Customize experiment parameters:
 ```bash
-# Run on CIFAR-100 with custom parameters
-python main_experiments.py --dataset cifar100 --num-samples 50 --budgets 1000 2000 4000
-
-# Use full submodular function instead of simple saliency
-python main_experiments.py --use-submodular --budgets 2000 4000 8000
-
-# Test different epsilon values for IOT algorithm
-python main_experiments.py --epsilons 0.1 0.2 0.5 --budgets 3000
-
-# Custom number of subregions per image
-python main_experiments.py --m 10 --budgets 5000
+python main_experiments.py --dataset cifar10 --num-samples 50 --budgets 10 20 50 100 --algorithms greedy ot iot --verbose
 ```
 
-**Note**: Use this directory if run in Google Colab ```/content/OT_IOT/run_experiments.py```
-### Command Line Arguments
+### Parameters
 
-- `--dataset`: Choose dataset (cifar10, cifar100, stl10, mnist, fashionmnist, imagenet)
-- `--data-root`: Root directory for dataset storage
-- `--num-samples`: Number of images to process
-- `--budgets`: List of budget constraints to test
-- `--epsilons`: List of epsilon values for IOT algorithm
-- `--use-submodular`: Enable full submodular function (4 components)
-- `--m`: Number of subregions per image
+| Parameter | Description | Default | Options |
+|-----------|-------------|---------|---------|
+| `--dataset` | Dataset to use | `cifar10` | `cifar10`, `cifar100`, `stl10`, `mnist`, `fashionmnist` |
+| `--num-samples` | Number of images to process | `20` | Any positive integer |
+| `--budgets` | Budget constraints to test | `[10, 20, 50]` | List of integers |
+| `--algorithms` | Algorithms to run | `["greedy", "ot", "iot"]` | Subset of `["greedy", "ot", "iot"]` |
+| `--epsilons` | Epsilon values for IOT | `[0.1, 0.2]` | List of floats |
+| `--m` | Subregions per image | `8` | Positive integer |
+| `--N` | Patch grid size (N×N) | `4` | Positive integer |
+| `--use-submodular` | Use full submodular function | `False` | Flag |
+| `--verbose` | Verbose output | `False` | Flag |
 
 ## Algorithms
 
-### 1. Greedy Search
-Classic greedy algorithm that iteratively selects the subregion with the highest gain-to-cost ratio.
+### 1. Greedy Search (GS)
+- **Paper Reference**: Algorithm 4
+- **Type**: Offline algorithm
+- **Approach**: Iteratively selects subregions with highest gain-to-cost ratio
+- **Time Complexity**: O(n²) where n is the number of subregions
 
-**Time Complexity**: O(n²)  
-**Memory**: O(n·m + |S|)
+### 2. Online Threshold (OT) 
+- **Type**: Online algorithm
+- **Approach**: Uses threshold-based selection for streaming subregions
+- **Advantage**: Processes data as it arrives without full dataset knowledge
 
-### 2. OT Algorithm (Online Threshold)
-Ultra-fast online algorithm that uses density-based sorting and aggressive optimizations.
+### 3. Improved Online Threshold (IOT)
+- **Type**: Online algorithm with ε-approximation
+- **Approach**: Enhanced threshold strategy with approximation guarantees
+- **Parameters**: Configurable ε values for approximation quality
 
-**Key Features**:
-- Batch precomputation of singleton values
-- Smart processing order based on gain density
-- Early termination conditions
+## Cost and Gain Functions
 
-**Time Complexity**: O(n log n)  
-**Memory**: O(m + |S+S'+1|)
+### Cost Function
+- **Type**: Modular cost function
+- **Formula**: c(S) = Σ_{I^M ∈ S} c(I^M)
+- **Implementation**: Based on subregion area with proper scaling
 
-### 3. IOT Algorithm (Improved Online Threshold)
-Enhanced version of OT with better approximation guarantees using multiple threshold candidates.
-
-**Key Features**:
-- Multiple threshold testing
-- Improved approximation ratio
-- Memory-efficient candidate management
-
-**Time Complexity**: O(n log n · |T|)  
-**Memory**: O(m + |S+S'+1| + |max candidates|)
-
-## Submodular Function
-
-The project implements a comprehensive submodular function with four components:
-
-```
-g(S) = λ₁·s_conf + λ₂·s_eff + λ₃·s_cons + λ₄·s_colla
-```
-
-Where:
-- **s_conf**: Confidence score using Evidential Deep Learning
-- **s_eff**: Effectiveness based on prediction accuracy
-- **s_cons**: Consistency across similar regions
-- **s_colla**: Collaboration between different regions
+### Gain Functions
+1. **Simple Saliency-based**: Uses saliency map values directly
+2. **4-Component Submodular**: Includes saliency, diversity, coverage, and model confidence
 
 ## Output
 
-The experiment generates a CSV file with results including:
-- Algorithm name and parameters
-- Dataset information
-- Budget constraints
-- Solution set size
-- Objective function gain
-- Runtime performance
-- Memory usage
+The experiments generate CSV files with the following metrics:
+- **Algorithm**: Which algorithm was used
+- **Budget**: Budget constraint value
+- **Total_Gain**: Achieved gain value
+- **Total_Cost**: Used budget/cost
+- **Budget_Utilization**: Percentage of budget used
+- **Runtime_seconds**: Execution time
+- **Memory_MB**: Peak memory usage
+- **Selected_Regions**: Number of selected subregions
+- **Operations**: Detailed operation counts
 
-Example output:
+## Performance Tracking
+
+The system tracks:
+- **Memory Usage**: Peak memory consumption during execution
+- **Operation Counts**: Detailed breakdown of computational operations
+- **Runtime**: Algorithm execution time
+- **Budget Utilization**: Efficiency of budget usage
+
+## Research Paper
+
+This implementation is based on the research paper "Online approximate algorithms for Object detection under Budget allocation" submitted to SOICT 2025. The paper provides theoretical analysis and experimental validation of the proposed algorithms.
+
+## Example Results
+
 ```
-Algorithm  Dataset  Budget  Epsilon  SetSize   Gain    Time(s)  Memory(KB)
-Greedy     cifar10   2000      -        15     156.7     0.45      892.3
-OT         cifar10   2000      -        14     151.2     0.12      445.6
-IOT        cifar10   2000     0.1       14     153.8     0.23      567.8
+Algorithm: Greedy_GS, Budget: 20, Gain: 15.47, Cost: 19.8, Runtime: 0.23s
+Algorithm: OT, Budget: 20, Gain: 14.12, Cost: 18.5, Runtime: 0.15s  
+Algorithm: IOT_eps0.1, Budget: 20, Gain: 14.89, Cost: 19.2, Runtime: 0.18s
 ```
-
-## Performance
-
-The algorithms are optimized for different scenarios:
-
-- **Greedy**: Best solution quality, higher computational cost
-- **OT**: Fastest execution, good approximation
-- **IOT**: Balance between speed and solution quality
-
-Typical performance on CIFAR-10 (100 images, budget=4000):
-- Greedy: ~2.3s, best gain
-- OT: ~0.5s, 95% of greedy gain
-- IOT: ~1.1s, 98% of greedy gain
-
-## Memory Efficiency
-
-The project includes theoretical memory calculation based on:
-- Number of images and subregions
-- Algorithm-specific data structures
-- Solution set sizes
-
-Memory usage is optimized through:
-- Lazy evaluation of submodular functions
-- Efficient data structures
-- Early pruning of infeasible candidates
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Implement your changes
-4. Add tests and documentation
-5. Submit a pull request
+This is a research implementation. For questions or collaborations, please refer to the paper authors.
 
 ## License
 
-This project is part of academic research. Please cite appropriately if used in publications.
+See LICENSE file for details.
 
-## Citation
 
-If you use this code in your research, please consider citing the associated paper.
-
-## Contact
-
-For questions or issues, please open a GitHub issue or contact me directly
