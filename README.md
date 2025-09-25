@@ -74,23 +74,23 @@ OT_IOT/
 Run experiments with default parameters:
 
 ```bash
-python run_experiments.py
+python main_experiments.py
 ```
 
 ### Advanced Usage
 
 ```bash
 # Run on CIFAR-100 with custom parameters
-python run_experiments.py --dataset cifar100 --num-samples 50 --budgets 1000 2000 4000
+python main_experiments.py --dataset cifar100 --num-samples 50 --budgets 1000 2000 4000
 
 # Use full submodular function instead of simple saliency
-python run_experiments.py --use-submodular --budgets 2000 4000 8000
+python main_experiments.py --use-submodular --budgets 2000 4000 8000
 
 # Test different epsilon values for IOT algorithm
-python run_experiments.py --epsilons 0.1 0.2 0.5 --budgets 3000
+python main_experiments.py --epsilons 0.1 0.2 0.5 --budgets 3000
 
 # Custom number of subregions per image
-python run_experiments.py --m 10 --budgets 5000
+python main_experiments.py --m 10 --budgets 5000
 ```
 
 **Note**: Use this directory if run in Google Colab ```/content/OT_IOT/run_experiments.py```
