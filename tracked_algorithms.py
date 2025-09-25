@@ -354,14 +354,17 @@ def IOT_Algorithm_Tracked(images, saliency_maps, N, m, budget, eps, cost_fn, gai
     # Line 3: S_b, M ← OT(N, A, m, B) - First stream
     (S_b, M), ot_memory = OT_Algorithm_Tracked(images, saliency_maps, N, m, budget, cost_fn, gain_fn)
 
-    # Add OT operations to IOT tracker
+    # Add OT operations to IOT tracker - fix key names
     ot_summary = ot_memory['operation_summary']
-    tracker.gain_function_calls += ot_summary['gain_calls']
-    tracker.marginal_gain_calls += ot_summary['marginal_gain_calls']
-    tracker.cost_function_calls += ot_summary['cost_calls']
-    tracker.set_operations += ot_summary['set_operations']
-    tracker.comparisons += ot_summary['comparisons']
-    tracker.threshold_checks += ot_summary['threshold_checks']
+    tracker.gain_function_calls += ot_summary.get('total_gain_calls', 0)
+    tracker.marginal_gain_calls += ot_summary.get('marginal_gain_calls', 0)
+    tracker.singleton_gain_calls += ot_summary.get('singleton_gain_calls', 0)
+    tracker.gain_union_calls += ot_summary.get('gain_union_calls', 0)
+    tracker.gain_current_set_calls += ot_summary.get('gain_current_set_calls', 0)
+    tracker.cost_function_calls += ot_summary.get('cost_calls', 0)
+    tracker.set_operations += ot_summary.get('set_operations', 0)
+    tracker.comparisons += ot_summary.get('comparisons', 0)
+    tracker.threshold_checks += ot_summary.get('threshold_checks', 0)
 
     # Line 4: Generate threshold set T
     T = []
@@ -435,9 +438,15 @@ def IOT_Algorithm_Tracked(images, saliency_maps, N, m, budget, eps, cost_fn, gai
     # Line 13-15: Final selection
     all_candidates = [S_b]
 
+    max_S_tau_size = 0
+    max_S_prime_tau_size = 0
+
     for tau in T:
         S_tau = candidates[tau]['S_tau']
         S_prime_tau = candidates[tau]['S_prime_tau']
+
+        max_S_tau_size = max(max_S_tau_size, len(S_tau))
+        max_S_prime_tau_size = max(max_S_prime_tau_size, len(S_prime_tau))
 
         # Check feasibility
         S_tau_cost = sum(cost_fn(x) for x in S_tau)
@@ -474,8 +483,8 @@ def IOT_Algorithm_Tracked(images, saliency_maps, N, m, budget, eps, cost_fn, gai
         'S_size': ot_memory['S_size'],
         'S_prime_size': ot_memory['S_prime_size'],
         'has_I_star': ot_memory['has_I_star'],
-        'max_S_tau_size': max(len(candidates[tau]['S_tau']) for tau in T),
-        'max_S_prime_tau_size': max(len(candidates[tau]['S_prime_tau']) for tau in T),
+        'max_S_tau_size': max_S_tau_size,
+        'max_S_prime_tau_size': max_S_prime_tau_size,
         'S_b_size': len(S_b),
         'operation_summary': tracker.get_summary()
     }

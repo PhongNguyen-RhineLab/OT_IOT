@@ -369,7 +369,7 @@ if __name__ == "__main__":
 
         if alg == "Greedy":
             # Greedy: O(|S| * n) to O(n^2) depending on solution size
-            solution_size = len([r for r in results if r[0] == "Greedy"][0][4])
+            solution_size = [r for r in results if r[0] == "Greedy"][0][4]
             theoretical_min = solution_size * n  # |S| * n
             theoretical_max = n ** 2  # Worst case O(n^2)
             theoretical_str = f"O(|S|*n) to O(n²)"
