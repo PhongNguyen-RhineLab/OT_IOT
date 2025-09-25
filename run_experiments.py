@@ -1,10 +1,8 @@
 import argparse
 import time
-import tracemalloc
 import numpy as np
 import pandas as pd
 import torch
-import torchvision
 import torchvision.transforms as transforms
 from torchvision.models import resnet18, ResNet18_Weights
 from torchvision.datasets import (
@@ -17,39 +15,56 @@ from gradcam import gradcam
 from submodular_function import create_gain_function
 
 
-# ----------------- Memory calculation helper ----------------- #
+# ----------------- Theoretical Memory Calculation ----------------- #
 def calculate_sizeof_subregion(sample_region):
-    """Calculate size of one subregion in KB"""
+    """Calculate size of one subregion in KB according to data structure"""
     size_bytes = 0
 
+    # Size of mask (H × W × 4 bytes for float32)
     if 'mask' in sample_region:
         mask = sample_region['mask']
         size_bytes += mask.nbytes
 
+    # Size of saliency map (H × W × 4 bytes for float32)
     if 'saliency' in sample_region:
         saliency = sample_region['saliency']
         size_bytes += saliency.nbytes
 
+    # Size of image reference (H × W × C × 4 bytes for float32)
     if 'image' in sample_region:
         image = sample_region['image']
         if isinstance(image, np.ndarray):
             size_bytes += image.nbytes
         else:
+            # Estimate standard size
             size_bytes += 224 * 224 * 3 * 4
 
+    # Metadata overhead (id string, gain_val float, etc.)
     size_bytes += 64
-    return size_bytes / 1024
+
+    return size_bytes / 1024  # Convert to KB
 
 
 def calculate_theoretical_memory(algorithm, num_images, m_per_image, solution_set,
                                  sample_subregion, aux_data=None):
-    """Calculate theoretical memory usage"""
+    """
+    Calculate theoretical memory according to formulas discussed:
+
+    Greedy: M = Số ảnh * m * sizeof(1 subregion) + |S| * sizeof(1 subregion)
+    OT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
+    IOT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub) + |max of S_tau + max of S'_tau + S_b| * sizeof(1 sub)
+    """
+    if not sample_subregion:
+        return 0
+
     sizeof_subregion = calculate_sizeof_subregion(sample_subregion)
 
     if algorithm == "Greedy":
+        # M = Số ảnh * m * sizeof(1 subregion) + |S| * sizeof(1 subregion)
         memory = (num_images * m_per_image + len(solution_set)) * sizeof_subregion
 
     elif algorithm == "OT":
+        # M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
         S_size = aux_data.get('S_size', 0) if aux_data else 0
         S_prime_size = aux_data.get('S_prime_size', 0) if aux_data else 0
         I_star_size = 1 if aux_data and aux_data.get('has_I_star', False) else 0
@@ -57,17 +72,23 @@ def calculate_theoretical_memory(algorithm, num_images, m_per_image, solution_se
         memory = m_per_image * sizeof_subregion + (S_size + S_prime_size + I_star_size) * sizeof_subregion
 
     elif algorithm == "IOT":
+        # M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub) + |max of S_tau + max of S'_tau + S_b| * sizeof(1 sub)
         S_size = aux_data.get('S_size', 0) if aux_data else 0
         S_prime_size = aux_data.get('S_prime_size', 0) if aux_data else 0
         I_star_size = 1 if aux_data and aux_data.get('has_I_star', False) else 0
 
+        # Additional IOT-specific memory components
         max_S_tau = aux_data.get('max_S_tau_size', 0) if aux_data else 0
         max_S_prime_tau = aux_data.get('max_S_prime_tau_size', 0) if aux_data else 0
         S_b_size = aux_data.get('S_b_size', 0) if aux_data else 0
 
-        memory = (m_per_image * sizeof_subregion +
-                  (S_size + S_prime_size + I_star_size) * sizeof_subregion +
-                  (max_S_tau + max_S_prime_tau + S_b_size) * sizeof_subregion)
+        # Base memory + dual candidates + IOT candidates
+        base_memory = m_per_image * sizeof_subregion
+        dual_candidates_memory = (S_size + S_prime_size + I_star_size) * sizeof_subregion
+        iot_specific_memory = (max_S_tau + max_S_prime_tau + S_b_size) * sizeof_subregion
+
+        memory = base_memory + dual_candidates_memory + iot_specific_memory
+
     else:
         memory = 0
 
@@ -75,7 +96,7 @@ def calculate_theoretical_memory(algorithm, num_images, m_per_image, solution_se
 
 
 def benchmark_with_theoretical_memory(func, algorithm, num_images, m_per_image, *args, **kwargs):
-    """Benchmark with both runtime, operation tracking and theoretical memory calculation"""
+    """Benchmark with runtime and theoretical memory calculation"""
     start = time.time()
     result, aux_memory_data = func(*args, **kwargs)
     runtime = time.time() - start
@@ -83,26 +104,23 @@ def benchmark_with_theoretical_memory(func, algorithm, num_images, m_per_image, 
     # Extract operation summary
     operation_summary = aux_memory_data.get('operation_summary', {})
 
-    # Extract solution and sample subregion for memory calculation
-    if result and len(result) >= 2 and isinstance(result[0], list):
+    # Extract solution set for memory calculation
+    if result and len(result) >= 2:
         solution_set = result[0]
         sample_subregion = solution_set[0] if solution_set else None
     else:
         solution_set = []
         sample_subregion = None
 
-    # Calculate theoretical memory if we have sample
-    if sample_subregion:
-        theoretical_memory = calculate_theoretical_memory(
-            algorithm, num_images, m_per_image, solution_set, sample_subregion, aux_memory_data
-        )
-    else:
-        theoretical_memory = 0
+    # Calculate theoretical memory
+    theoretical_memory = calculate_theoretical_memory(
+        algorithm, num_images, m_per_image, solution_set, sample_subregion, aux_memory_data
+    )
 
     return result, runtime, theoretical_memory, operation_summary, aux_memory_data
 
 
-# ----------------- Cost & Gain ----------------- #
+# ----------------- Cost & Gain Functions ----------------- #
 def cost_fn(region_or_list):
     """Handle both single region and list of regions"""
     if isinstance(region_or_list, list):
@@ -187,14 +205,13 @@ def load_dataset(name: str, weights, root: str, num_samples: int):
     return images, saliency_maps
 
 
-# ----------------- Main ----------------- #
+# ----------------- Main Experiment Runner ----------------- #
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="cifar10",
                         choices=["cifar10", "cifar100", "stl10",
                                  "mnist", "fashionmnist", "imagenet"])
-    parser.add_argument("--data-root", default="./data",
-                        help="Root folder (used for downloads or ImageNet path).")
+    parser.add_argument("--data-root", default="./data")
     parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument("--budgets", type=int, nargs="+", default=[2000, 4000, 8000])
     parser.add_argument("--epsilons", type=float, nargs="+", default=[0.1, 0.3])
@@ -207,11 +224,12 @@ if __name__ == "__main__":
     model = resnet18(weights=weights)
     model.eval()
 
+    print(f"Loading {args.num_samples} samples from {args.dataset}...")
     images, saliency_maps = load_dataset(
         args.dataset, weights, args.data_root, args.num_samples
     )
 
-    # Choose gain function (keep original logic)
+    # Choose gain function
     if args.use_submodular:
         print("Using full submodular function (4 components)")
         feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
@@ -230,6 +248,7 @@ if __name__ == "__main__":
     results = []
     operation_results = []
     gain_breakdown_data = []
+    memory_breakdown_data = []
 
     for B in args.budgets:
         print(f"\n=== Budget: {B} ===")
@@ -241,6 +260,7 @@ if __name__ == "__main__":
             images, saliency_maps, N=4, m=args.m,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
+
         results.append(["Greedy", args.dataset, B, "-", len(S_gs), g_gs, t_gs, mem_gs])
         operation_results.append(["Greedy", B, ops_gs.get('total_oracle_calls', 0),
                                   ops_gs.get('total_gain_calls', 0), ops_gs.get('marginal_gain_calls', 0),
@@ -249,6 +269,12 @@ if __name__ == "__main__":
             ["Greedy", B, ops_gs.get('total_gain_calls', 0), ops_gs.get('singleton_gain_calls', 0),
              ops_gs.get('marginal_gain_calls', 0), ops_gs.get('gain_union_calls', 0),
              ops_gs.get('gain_current_set_calls', 0)])
+
+        # Memory breakdown for Greedy
+        sizeof_subregion = calculate_sizeof_subregion(S_gs[0]) if S_gs else 0
+        greedy_theoretical = (args.num_samples * args.m + len(S_gs)) * sizeof_subregion
+        memory_breakdown_data.append(
+            ["Greedy", B, sizeof_subregion, args.num_samples * args.m, len(S_gs), 0, 0, 0, greedy_theoretical])
 
         print(f"Greedy: |S|={len(S_gs)}, g(S)={g_gs:.3f}, time={t_gs:.3f}s, mem={mem_gs:.1f}KB")
         print(f"        Oracle calls: {ops_gs.get('total_oracle_calls', 0)}")
@@ -260,6 +286,7 @@ if __name__ == "__main__":
             images, saliency_maps, N=4, m=args.m,
             budget=B, cost_fn=cost_fn, gain_fn=gain_fn
         )
+
         results.append(["OT", args.dataset, B, "-", len(S_ot), g_ot, t_ot, mem_ot])
         operation_results.append(["OT", B, ops_ot.get('total_oracle_calls', 0),
                                   ops_ot.get('total_gain_calls', 0), ops_ot.get('marginal_gain_calls', 0),
@@ -267,6 +294,14 @@ if __name__ == "__main__":
         gain_breakdown_data.append(["OT", B, ops_ot.get('total_gain_calls', 0), ops_ot.get('singleton_gain_calls', 0),
                                     ops_ot.get('marginal_gain_calls', 0), ops_ot.get('gain_union_calls', 0),
                                     ops_ot.get('gain_current_set_calls', 0)])
+
+        # Memory breakdown for OT: M = m * sizeof(1 sub) + |S+S'+1| * sizeof(1 sub)
+        S_size = aux_ot.get('S_size', 0)
+        S_prime_size = aux_ot.get('S_prime_size', 0)
+        I_star_size = 1 if aux_ot.get('has_I_star', False) else 0
+        ot_theoretical = args.m * sizeof_subregion + (S_size + S_prime_size + I_star_size) * sizeof_subregion
+        memory_breakdown_data.append(
+            ["OT", B, sizeof_subregion, args.m, S_size + S_prime_size + I_star_size, 0, 0, 0, ot_theoretical])
 
         print(f"OT: |S|={len(S_ot)}, g(S)={g_ot:.3f}, time={t_ot:.3f}s, mem={mem_ot:.1f}KB")
         print(f"    Oracle calls: {ops_ot.get('total_oracle_calls', 0)}")
@@ -279,6 +314,7 @@ if __name__ == "__main__":
                 images, saliency_maps, N=4, m=args.m,
                 budget=B, eps=eps, cost_fn=cost_fn, gain_fn=gain_fn
             )
+
             results.append(["IOT", args.dataset, B, eps, len(S_iot), g_iot, t_iot, mem_iot])
             operation_results.append(["IOT", B, ops_iot.get('total_oracle_calls', 0),
                                       ops_iot.get('total_gain_calls', 0), ops_iot.get('marginal_gain_calls', 0),
@@ -288,10 +324,27 @@ if __name__ == "__main__":
                  ops_iot.get('marginal_gain_calls', 0), ops_iot.get('gain_union_calls', 0),
                  ops_iot.get('gain_current_set_calls', 0)])
 
+            # Memory breakdown for IOT
+            iot_S_size = aux_iot.get('S_size', 0)
+            iot_S_prime_size = aux_iot.get('S_prime_size', 0)
+            iot_I_star_size = 1 if aux_iot.get('has_I_star', False) else 0
+            max_S_tau = aux_iot.get('max_S_tau_size', 0)
+            max_S_prime_tau = aux_iot.get('max_S_prime_tau_size', 0)
+            S_b_size = aux_iot.get('S_b_size', 0)
+
+            base_mem = args.m * sizeof_subregion
+            dual_mem = (iot_S_size + iot_S_prime_size + iot_I_star_size) * sizeof_subregion
+            iot_specific_mem = (max_S_tau + max_S_prime_tau + S_b_size) * sizeof_subregion
+            iot_theoretical = base_mem + dual_mem + iot_specific_mem
+
+            memory_breakdown_data.append(
+                ["IOT", B, sizeof_subregion, args.m, iot_S_size + iot_S_prime_size + iot_I_star_size,
+                 max_S_tau + max_S_prime_tau + S_b_size, base_mem, dual_mem, iot_theoretical])
+
             print(f"IOT (ε={eps}): |S|={len(S_iot)}, g(S)={g_iot:.3f}, time={t_iot:.3f}s, mem={mem_iot:.1f}KB")
             print(f"               Oracle calls: {ops_iot.get('total_oracle_calls', 0)}")
 
-    # Create results DataFrames
+    # Create DataFrames
     df_results = pd.DataFrame(results, columns=[
         "Algorithm", "Dataset", "Budget", "Epsilon", "SetSize", "Gain", "Time(s)", "Memory(KB)"
     ])
@@ -305,130 +358,58 @@ if __name__ == "__main__":
         "Algorithm", "Budget", "Total_g_Calls", "g({e})_Calls", "g(e|S)_Computations", "g(S∪{e})_Calls", "g(S)_Calls"
     ])
 
+    df_memory_breakdown = pd.DataFrame(memory_breakdown_data, columns=[
+        "Algorithm", "Budget", "Sizeof_Subregion_KB", "Base_Components", "Dual_Components", "IOT_Components",
+        "Base_Memory_KB", "Dual_Memory_KB", "Total_Memory_KB"
+    ])
+
     # Save results
     suffix = "_submodular" if args.use_submodular else "_simple"
     results_file = f"experiment_results{suffix}.csv"
     operations_file = f"operation_analysis{suffix}.csv"
     gain_file = f"gain_breakdown{suffix}.csv"
+    memory_file = f"memory_breakdown{suffix}.csv"
 
     df_results.to_csv(results_file, index=False)
     df_operations.to_csv(operations_file, index=False)
     df_gain_breakdown.to_csv(gain_file, index=False)
+    df_memory_breakdown.to_csv(memory_file, index=False)
 
-    print(f"\nSaved results to {results_file}")
-    print(f"Saved operation analysis to {operations_file}")
-    print(f"Saved gain breakdown to {gain_file}")
+    print(f"\nSaved results to:")
+    print(f"  - {results_file}")
+    print(f"  - {operations_file}")
+    print(f"  - {gain_file}")
+    print(f"  - {memory_file}")
 
-    # Display final results
+    # Display results
     print(f"\n=== FINAL RESULTS ===")
     print(df_results)
 
-    print(f"\n=== OPERATION ANALYSIS ===")
-    print(df_operations)
-
-    print(f"\n=== DETAILED GAIN FUNCTION BREAKDOWN ===")
-    print(df_gain_breakdown)
-
-    # Gain Function Analysis
-    print(f"\n=== GAIN FUNCTION CALL ANALYSIS ===")
-    print("Expected breakdown per algorithm:")
-    print("Greedy: Many g(S∪{e}) and g(S) calls for marginal gains")
-    print("OT: g(S∪{e}), g(S), g({e}) calls")
-    print("IOT: Similar to OT but 2x (two passes)")
+    print(f"\n=== MEMORY BREAKDOWN ANALYSIS ===")
+    print(df_memory_breakdown)
     print()
+    print("Memory Formula Verification:")
+    print("Greedy: M = #images × m × sizeof(subregion) + |S| × sizeof(subregion)")
+    print("OT:     M = m × sizeof(subregion) + (|S| + |S'| + |I*|) × sizeof(subregion)")
+    print(
+        "IOT:    M = m × sizeof(subregion) + (|S| + |S'| + |I*|) × sizeof(subregion) + (max|S_τ| + max|S'_τ| + |S_b|) × sizeof(subregion)")
 
-    for _, row in df_gain_breakdown.iterrows():
+    for _, row in df_memory_breakdown.iterrows():
         alg = row['Algorithm']
-        total_g = row['Total_g_Calls']
-        singleton = row['g({e})_Calls']
-        union_calls = row['g(S∪{e})_Calls']
-        current_calls = row['g(S)_Calls']
-        marginal_comp = row['g(e|S)_Computations']
-
-        print(
-            f"{alg:8s}: g(·) total={total_g:3d} | g({{e}})={singleton:2d} | g(S∪{{e}})={union_calls:2d} | g(S)={current_calls:2d} | marginal computations={marginal_comp:2d}")
-
-        # Verify marginal computation accounting
-        expected_marginal_calls = union_calls + current_calls
-        if expected_marginal_calls > 0:
-            print(
-                f"         → Marginal calls: {union_calls} + {current_calls} = {expected_marginal_calls} (for {marginal_comp} computations)")
-        print()
-
-    # Theoretical vs Actual Complexity Analysis
-    print(f"\n=== COMPLEXITY ANALYSIS ===")
-    n = args.num_samples * args.m  # Total regions
-
-    print(f"Total regions (n): {n}")
-    print(f"Algorithm    | Actual Oracle Calls | Theoretical | Expected Range | Status")
-    print(f"-------------|-------------------|-------------|----------------|--------")
-
-    for _, row in df_operations.iterrows():
-        alg = row['Algorithm']
-        oracle_calls = row['Total_Oracle_Calls']
+        sizeof_sub = row['Sizeof_Subregion_KB']
+        base_comp = row['Base_Components']
+        dual_comp = row['Dual_Components']
+        iot_comp = row['IOT_Components'] if not pd.isna(row['IOT_Components']) else 0
+        total_mem = row['Total_Memory_KB']
 
         if alg == "Greedy":
-            # Greedy: O(|S| * n) to O(n^2) depending on solution size
-            solution_size = [r for r in results if r[0] == "Greedy"][0][4]
-            theoretical_min = solution_size * n  # |S| * n
-            theoretical_max = n ** 2  # Worst case O(n^2)
-            theoretical_str = f"O(|S|*n) to O(n²)"
-            expected_range = f"{theoretical_min}-{theoretical_max}"
-
-            if theoretical_min <= oracle_calls <= theoretical_max:
-                status = "✅ CORRECT"
-            else:
-                status = "❌ WRONG"
-
+            expected = base_comp * sizeof_sub
+            print(f"{alg:8s}: {base_comp} × {sizeof_sub:.1f} = {expected:.1f} KB (actual: {total_mem:.1f})")
         elif alg == "OT":
-            theoretical = 3 * n  # 3n as per paper
-            theoretical_str = f"3n"
-            expected_range = f"~{theoretical}"
-
-            if 2 * n <= oracle_calls <= 4 * n:  # Allow some variance
-                status = "✅ CORRECT"
-            else:
-                status = "❌ WRONG" if oracle_calls < n else "⚠️ HIGH"
-
+            expected = base_comp * sizeof_sub + dual_comp * sizeof_sub
+            print(
+                f"{alg:8s}: {base_comp} × {sizeof_sub:.1f} + {dual_comp} × {sizeof_sub:.1f} = {expected:.1f} KB (actual: {total_mem:.1f})")
         elif alg == "IOT":
-            theoretical = 5 * n  # 5n as per paper
-            theoretical_str = f"5n"
-            expected_range = f"~{theoretical}"
-
-            if 4 * n <= oracle_calls <= 8 * n:  # Allow some variance
-                status = "✅ CORRECT"
-            else:
-                status = "❌ WRONG" if oracle_calls < 3 * n else "⚠️ HIGH"
-        else:
-            theoretical_str = "Unknown"
-            expected_range = "Unknown"
-            status = "❓"
-
-        print(f"{alg:12s} | {oracle_calls:17d} | {theoretical_str:11s} | {expected_range:14s} | {status}")
-
-    # Additional analysis
-    print(f"\n=== EXPECTED ORACLE CALL ORDERING ===")
-    oracle_by_alg = {}
-    for _, row in df_operations.iterrows():
-        oracle_by_alg[row['Algorithm']] = row['Total_Oracle_Calls']
-
-    expected_order = ["IOT", "OT", "Greedy"]  # Should be in decreasing order for small n
-    actual_order = sorted(oracle_by_alg.keys(), key=lambda x: oracle_by_alg[x], reverse=True)
-
-    print(f"Expected order (most to least calls): {expected_order}")
-    print(f"Actual order: {actual_order}")
-
-    if actual_order == expected_order:
-        print("✅ Oracle call ordering matches theory!")
-    else:
-        print("⚠️ Oracle call ordering differs from theory - this may be normal for small n")
-
-        # Explain why ordering might be different
-        greedy_calls = oracle_by_alg.get("Greedy", 0)
-        ot_calls = oracle_by_alg.get("OT", 0)
-
-        if greedy_calls < ot_calls:
-            solution_size = len([r for r in results if r[0] == "Greedy"][0][4])
-            print(f"   → Greedy solution size |S|={solution_size} is small")
-            print(f"   → Actual Greedy complexity ≈ |S|*n = {solution_size}*{n} = {solution_size * n}")
-            print(f"   → This is less than OT's 3n = {3 * n}, which is expected for small solutions")
+            expected = base_comp * sizeof_sub + dual_comp * sizeof_sub + iot_comp * sizeof_sub
+            print(
+                f"{alg:8s}: {base_comp} × {sizeof_sub:.1f} + {dual_comp} × {sizeof_sub:.1f} + {iot_comp} × {sizeof_sub:.1f} = {expected:.1f} KB (actual: {total_mem:.1f})")
