@@ -124,41 +124,56 @@ def _calculate_confidence_score(regions, model):
     """Calculate confidence score s_conf using model predictions"""
     if not model:
         # Fallback: use simple saliency-based confidence
-        return sum(r["gain_val"] for r in regions) / 1000.0  # Normalize
+        try:
+            return sum(r.get("gain_val", 0) for r in regions) / 1000.0  # Normalize
+        except:
+            return 0.0
 
     try:
         import torch
         total_confidence = 0.0
 
         for region in regions:
-            # Apply region mask to image
-            if 'original_mask' in region:
-                mask = region["original_mask"]
-            else:
-                mask = region["mask"]
+            try:
+                # Apply region mask to image
+                if 'original_mask' in region:
+                    mask = region["original_mask"]
+                else:
+                    mask = region["mask"]
 
-            # Convert to tensor and apply mask
-            image = torch.from_numpy(region["image"]).float()
-            if len(image.shape) == 3:
-                image = image.permute(2, 0, 1)  # HWC -> CHW
+                # Ensure image is valid numpy array
+                image_data = region["image"]
+                if not isinstance(image_data, np.ndarray):
+                    continue
 
-            mask_tensor = torch.from_numpy(mask).float()
-            if len(mask_tensor.shape) == 2:
-                mask_tensor = mask_tensor.unsqueeze(0).expand(3, -1, -1)
+                # Convert to tensor and apply mask
+                image = torch.from_numpy(image_data).float()
+                if len(image.shape) == 3:
+                    image = image.permute(2, 0, 1)  # HWC -> CHW
 
-            masked_image = image * mask_tensor
+                mask_tensor = torch.from_numpy(mask).float()
+                if len(mask_tensor.shape) == 2:
+                    mask_tensor = mask_tensor.unsqueeze(0).expand(3, -1, -1)
 
-            # Get model confidence (simplified)
-            with torch.no_grad():
-                output = model(masked_image.unsqueeze(0))
-                confidence = torch.softmax(output, dim=1).max().item()
-                total_confidence += confidence
+                masked_image = image * mask_tensor
+
+                # Get model confidence (simplified)
+                with torch.no_grad():
+                    output = model(masked_image.unsqueeze(0))
+                    confidence = torch.softmax(output, dim=1).max().item()
+                    total_confidence += confidence
+            except Exception as e:
+                # Skip problematic regions
+                continue
 
         return total_confidence
 
     except Exception as e:
         # Fallback to simple calculation
-        return sum(r["gain_val"] for r in regions) / 1000.0
+        try:
+            return sum(r.get("gain_val", 0) for r in regions) / 1000.0
+        except:
+            return 0.0
 
 
 def _calculate_effectiveness_score(regions, feature_extractor):
@@ -172,25 +187,37 @@ def _calculate_effectiveness_score(regions, feature_extractor):
 
         features = []
         for region in regions:
-            # Extract features
-            if 'original_mask' in region:
-                mask = region["original_mask"]
-            else:
-                mask = region["mask"]
+            # Extract features with proper error handling
+            try:
+                if 'original_mask' in region:
+                    mask = region["original_mask"]
+                else:
+                    mask = region["mask"]
 
-            image = torch.from_numpy(region["image"]).float()
-            if len(image.shape) == 3:
-                image = image.permute(2, 0, 1)
+                # Ensure image is valid numpy array
+                image_data = region["image"]
+                if not isinstance(image_data, np.ndarray):
+                    continue
 
-            mask_tensor = torch.from_numpy(mask).float()
-            if len(mask_tensor.shape) == 2:
-                mask_tensor = mask_tensor.unsqueeze(0).expand(3, -1, -1)
+                image = torch.from_numpy(image_data).float()
+                if len(image.shape) == 3:
+                    image = image.permute(2, 0, 1)
 
-            masked_image = image * mask_tensor
+                mask_tensor = torch.from_numpy(mask).float()
+                if len(mask_tensor.shape) == 2:
+                    mask_tensor = mask_tensor.unsqueeze(0).expand(3, -1, -1)
 
-            with torch.no_grad():
-                feature = feature_extractor(masked_image.unsqueeze(0))
-                features.append(feature.cpu().numpy().flatten())
+                masked_image = image * mask_tensor
+
+                with torch.no_grad():
+                    feature = feature_extractor(masked_image.unsqueeze(0))
+                    features.append(feature.cpu().numpy().flatten())
+            except Exception as e:
+                # Skip problematic regions
+                continue
+
+        if len(features) <= 1:
+            return 0.0
 
         # Calculate pairwise distances
         total_effectiveness = 0.0
@@ -198,8 +225,11 @@ def _calculate_effectiveness_score(regions, feature_extractor):
             min_distance = float('inf')
             for j, feat_j in enumerate(features):
                 if i != j:
-                    distance = 1 - cosine_similarity([feat_i], [feat_j])[0][0]
-                    min_distance = min(min_distance, distance)
+                    try:
+                        distance = 1 - cosine_similarity([feat_i], [feat_j])[0][0]
+                        min_distance = min(min_distance, distance)
+                    except:
+                        continue
 
             if min_distance != float('inf'):
                 total_effectiveness += min_distance
@@ -208,13 +238,16 @@ def _calculate_effectiveness_score(regions, feature_extractor):
 
     except Exception as e:
         # Fallback: use gain variance as effectiveness proxy
-        gains = [r["gain_val"] for r in regions]
-        return float(np.std(gains))
+        try:
+            gains = [r["gain_val"] for r in regions if "gain_val" in r]
+            return float(np.std(gains)) if gains else 0.0
+        except:
+            return 0.0
 
 
 def _calculate_consistency_score(regions, feature_extractor, original_image):
     """Calculate consistency score s_cons with target semantic feature"""
-    if not regions or not original_image:
+    if not regions or original_image is None:
         return 0.0
 
     try:
@@ -224,11 +257,18 @@ def _calculate_consistency_score(regions, feature_extractor, original_image):
         # Combine all region masks
         combined_mask = np.zeros_like(regions[0]['saliency'])
         for region in regions:
-            if 'original_mask' in region:
-                mask = region["original_mask"]
-            else:
-                mask = region["mask"]
-            combined_mask = np.maximum(combined_mask, mask)
+            try:
+                if 'original_mask' in region:
+                    mask = region["original_mask"]
+                else:
+                    mask = region["mask"]
+                combined_mask = np.maximum(combined_mask, mask)
+            except:
+                continue
+
+        # Ensure original_image is valid numpy array
+        if not isinstance(original_image, np.ndarray):
+            return 0.0
 
         # Get features of combined regions
         image = torch.from_numpy(original_image).float()
@@ -255,13 +295,16 @@ def _calculate_consistency_score(regions, feature_extractor, original_image):
 
     except Exception as e:
         # Fallback: normalized total gain
-        total_gain = sum(r["gain_val"] for r in regions)
-        return total_gain / 10000.0  # Normalize
+        try:
+            total_gain = sum(r.get("gain_val", 0) for r in regions)
+            return total_gain / 10000.0  # Normalize
+        except:
+            return 0.0
 
 
 def _calculate_collaboration_score(regions, feature_extractor, original_image):
     """Calculate collaboration score s_colla = 1 - similarity(complement, target)"""
-    if not regions or not original_image:
+    if not regions or original_image is None:
         return 0.0
 
     try:
@@ -271,14 +314,21 @@ def _calculate_collaboration_score(regions, feature_extractor, original_image):
         # Create combined mask of selected regions
         combined_mask = np.zeros_like(regions[0]['saliency'])
         for region in regions:
-            if 'original_mask' in region:
-                mask = region["original_mask"]
-            else:
-                mask = region["mask"]
-            combined_mask = np.maximum(combined_mask, mask)
+            try:
+                if 'original_mask' in region:
+                    mask = region["original_mask"]
+                else:
+                    mask = region["mask"]
+                combined_mask = np.maximum(combined_mask, mask)
+            except:
+                continue
 
         # Create complement mask
         complement_mask = 1 - combined_mask
+
+        # Ensure original_image is valid numpy array
+        if not isinstance(original_image, np.ndarray):
+            return 0.0
 
         # Get features
         image = torch.from_numpy(original_image).float()
@@ -305,8 +355,11 @@ def _calculate_collaboration_score(regions, feature_extractor, original_image):
 
     except Exception as e:
         # Fallback: inverse of effectiveness
-        effectiveness = _calculate_effectiveness_score(regions, feature_extractor)
-        return 1.0 / (effectiveness + 1.0)
+        try:
+            effectiveness = _calculate_effectiveness_score(regions, feature_extractor)
+            return 1.0 / (effectiveness + 1.0)
+        except:
+            return 0.5  # Neutral fallback
 
 
 def create_gain_function(use_submodular=False, model=None, feature_extractor=None,
