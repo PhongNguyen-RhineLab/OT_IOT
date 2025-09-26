@@ -9,85 +9,144 @@ from operation_tracker import PaperOperationTracker
 from memory_calculator import MemoryCalculator
 
 
-def paper_greedy_search(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
+def paper_greedy_search(images, saliency_maps, N, m, budget, cost_fn, gain_fn, timeout_seconds=300):
     """
-    Algorithm GS (Greedy Search) from paper - Algorithm 4
+    Algorithm GS (Greedy Search) from paper - Algorithm 4 with timeout
+
+    Args:
+        timeout_seconds: Maximum runtime in seconds (default: 5 minutes)
 
     Returns dict with solution, gain, runtime, memory, and operation tracking
     """
+    import signal
+
     tracker = PaperOperationTracker("Greedy_GS")
     memory_calc = MemoryCalculator()
 
-    print(f"Starting Algorithm GS (Greedy Search)")
+    print(f"Starting Algorithm GS (Greedy Search) with {timeout_seconds}s timeout")
     start_time = time.time()
 
-    # Line 1: V ← ID(I, N, A, m)
-    V = image_division(images, saliency_maps, N, m)
-    n = len(V)
-    print(f"  Generated {n} subregions")
+    # Setup timeout handler
+    class TimeoutException(Exception):
+        pass
 
-    # Line 2: S ← ∅
-    S = []
+    def timeout_handler(signum, frame):
+        raise TimeoutException("Greedy algorithm timed out")
 
-    # Line 3: U ← V
-    U = list(V)
+    # Set timeout (only works on Unix-like systems)
+    timeout_set = False
+    try:
+        if hasattr(signal, 'SIGALRM'):  # Unix/Linux/Mac
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout_seconds)
+            timeout_set = True
+            print(f"  Timeout set for {timeout_seconds} seconds")
+    except:
+        print("  Warning: Timeout not available on this system, using iteration limit")
 
-    iteration = 0
-    # Line 4: repeat
-    while U:
-        tracker.count_iteration()
-        iteration += 1
+    try:
+        # Line 1: V ← ID(I, N, A, m)
+        V = image_division(images, saliency_maps, N, m)
+        n = len(V)
+        print(f"  Generated {n} subregions")
 
-        if iteration % 100 == 0:
-            print(f"    Iteration {iteration}: |U|={len(U)}, |S|={len(S)}")
+        # Line 2: S ← ∅
+        S = []
 
-        # Line 5: I_t^M ← arg max_{I^M ∈ U} g(I^M|S + I^M)/c(I^M)
-        best_region = None
-        best_density = -float('inf')
+        # Line 3: U ← V
+        U = list(V)
 
-        for region in U:
-            # Calculate marginal gain g(I^M|S)
-            tracker.count_marginal_gain()
-            if S:
-                tracker.count_oracle("union")
-                gain_with = gain_fn(S + [region])
-                tracker.count_oracle("current_set")
-                gain_without = gain_fn(S)
-                marginal_gain = gain_with - gain_without
+        iteration = 0
+        max_iterations = min(n, 1000)  # Fallback limit for systems without signal
+
+        # Line 4: repeat
+        while U and iteration < max_iterations:
+            tracker.count_iteration()
+            iteration += 1
+
+            # Check manual timeout for Windows
+            if not timeout_set and time.time() - start_time > timeout_seconds:
+                print(f"    Manual timeout after {timeout_seconds}s")
+                break
+
+            if iteration % 100 == 0:
+                elapsed = time.time() - start_time
+                print(f"    Iteration {iteration}: |U|={len(U)}, |S|={len(S)}, elapsed={elapsed:.1f}s")
+
+            # Line 5: I_t^M ← arg max_{I^M ∈ U} g(I^M|S + I^M)/c(I^M)
+            best_region = None
+            best_density = -float('inf')
+
+            # Early termination if too many regions to process
+            regions_to_check = U[:min(len(U), 500)] if len(U) > 500 else U
+            if len(U) > 500:
+                print(f"    Limiting search to {len(regions_to_check)} regions for efficiency")
+
+            for region in regions_to_check:
+                # Calculate marginal gain g(I^M|S)
+                tracker.count_marginal_gain()
+                if S:
+                    tracker.count_oracle("union")
+                    gain_with = gain_fn(S + [region])
+                    tracker.count_oracle("current_set")
+                    gain_without = gain_fn(S)
+                    marginal_gain = gain_with - gain_without
+                else:
+                    tracker.count_singleton()
+                    marginal_gain = gain_fn([region])
+
+                # Calculate density
+                cost = cost_fn(region)
+                if cost > 0:
+                    density = marginal_gain / cost
+                    tracker.count_density_comparison()
+                    if density > best_density:
+                        best_density = density
+                        best_region = region
+
+            if best_region is None:
+                print(f"    No valid region found at iteration {iteration}")
+                break
+
+            # Line 6: if c(S + I_t^M) ≤ B then
+            current_cost = cost_fn(S)
+            new_cost = cost_fn(best_region)
+            tracker.count_budget_check()
+
+            if current_cost + new_cost <= budget:
+                # Line 7: S = S + I_t^M
+                S.append(best_region)
+                tracker.update_set_sizes(len(S))
             else:
-                tracker.count_singleton()
-                marginal_gain = gain_fn([region])
+                print(f"    Budget constraint violated at iteration {iteration}")
+                break
 
-            # Calculate density
-            cost = cost_fn(region)
-            if cost > 0:
-                density = marginal_gain / cost
-                tracker.count_density_comparison()
-                if density > best_density:
-                    best_density = density
-                    best_region = region
+            # Line 8: U ← U \ {I_t^M}
+            U.remove(best_region)
 
-        if best_region is None:
-            print(f"    No valid region found at iteration {iteration}")
-            break
+            # Line 9: until U = ∅
 
-        # Line 6: if c(S + I_t^M) ≤ B then
-        current_cost = cost_fn(S)
-        new_cost = cost_fn(best_region)
-        tracker.count_budget_check()
+        completion_reason = "completed"
+        if iteration >= max_iterations:
+            completion_reason = "iteration_limit"
+        elif time.time() - start_time >= timeout_seconds:
+            completion_reason = "timeout"
 
-        if current_cost + new_cost <= budget:
-            # Line 7: S = S + I_t^M
-            S.append(best_region)
-            tracker.update_set_sizes(len(S))
-        else:
-            print(f"    Budget constraint violated at iteration {iteration}")
-            break
+    except TimeoutException:
+        print(f"  Greedy algorithm timed out after {timeout_seconds} seconds")
+        completion_reason = "timeout"
 
-        # Line 8: U ← U \ {I_t^M}
-        U.remove(best_region)
+    except KeyboardInterrupt:
+        print(f"  Greedy algorithm interrupted by user")
+        completion_reason = "interrupted"
 
-        # Line 9: until U = ∅
+    finally:
+        # Clear timeout
+        if timeout_set:
+            try:
+                signal.alarm(0)
+            except:
+                pass
 
     # Final evaluation
     if S:
@@ -103,7 +162,7 @@ def paper_greedy_search(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
         len(images), m, len(S)
     )
 
-    print(f"  Algorithm GS completed in {runtime:.3f}s")
+    print(f"  Algorithm GS {completion_reason} in {runtime:.3f}s")
     print(f"  Solution: |S|={len(S)}, gain={final_gain:.3f}")
     print(f"  Operations: {tracker.oracle_calls} oracle calls, {tracker.iterations} iterations")
 
@@ -114,7 +173,9 @@ def paper_greedy_search(images, saliency_maps, N, m, budget, cost_fn, gain_fn):
         'runtime': runtime,
         'memory_kb': memory_kb,
         'memory_breakdown': memory_breakdown,
-        'operations': tracker.get_summary()
+        'operations': tracker.get_summary(),
+        'completion_reason': completion_reason,
+        'iterations_completed': iteration
     }
 
 
@@ -368,7 +429,7 @@ def paper_iot_algorithm(images, saliency_maps, N, m, budget, epsilon, cost_fn, g
             current_cost = cost_fn(X_tau)
 
             if (region_cost > 0 and marginal_X / region_cost >= tau and
-                    current_cost + region_cost <= budget):
+                current_cost + region_cost <= budget):
                 # Line 12: X_τ = X_τ + I^M
                 candidates[tau][target_key] = X_tau + [I_M]
 
@@ -459,30 +520,30 @@ def test_algorithms():
     print(f"Test parameters: N={N}, m={m}, budget={budget}")
 
     # Test Greedy
-    print(f"\n{'-' * 20} TESTING GREEDY {'-' * 20}")
+    print(f"\n{'-'*20} TESTING GREEDY {'-'*20}")
     greedy_result = paper_greedy_search(
         test_images, test_saliency, N, m, budget,
         paper_cost_function, paper_gain_function_simple
     )
 
     # Test OT
-    print(f"\n{'-' * 20} TESTING OT {'-' * 20}")
+    print(f"\n{'-'*20} TESTING OT {'-'*20}")
     ot_result = paper_ot_algorithm(
         test_images, test_saliency, N, m, budget,
         paper_cost_function, paper_gain_function_simple
     )
 
     # Test IOT
-    print(f"\n{'-' * 20} TESTING IOT {'-' * 20}")
+    print(f"\n{'-'*20} TESTING IOT {'-'*20}")
     iot_result = paper_iot_algorithm(
         test_images, test_saliency, N, m, budget, epsilon,
         paper_cost_function, paper_gain_function_simple
     )
 
     # Compare results
-    print(f"\n{'=' * 50}")
+    print(f"\n{'='*50}")
     print("ALGORITHM COMPARISON")
-    print('=' * 50)
+    print('='*50)
     results = [greedy_result, ot_result, iot_result]
 
     print(f"{'Algorithm':<10} {'|S|':<5} {'Gain':<8} {'Time(s)':<8} {'Memory(KB)':<12} {'Oracles':<8}")
