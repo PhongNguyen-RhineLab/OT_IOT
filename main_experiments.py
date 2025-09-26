@@ -47,14 +47,6 @@ def parse_arguments():
     parser.add_argument("--N", type=int, default=4,
                         help="Patch grid size (N×N patches)")
 
-    # Timeout parameters
-    parser.add_argument("--greedy-timeout", type=int, default=300,
-                        help="Timeout for Greedy algorithm in seconds (default: 300s)")
-    parser.add_argument("--ot-timeout", type=int, default=600,
-                        help="Timeout for OT algorithm in seconds (default: 600s)")
-    parser.add_argument("--iot-timeout", type=int, default=900,
-                        help="Timeout for IOT algorithm in seconds (default: 900s)")
-
     # Experiment options
     parser.add_argument("--use-submodular", action="store_true",
                         help="Use full 4-component submodular function")
@@ -146,15 +138,14 @@ def run_feasibility_check(images, saliency_maps, args, cost_fn, gain_fn):
 
 def run_single_experiment(algorithm_name, images, saliency_maps, args, budget,
                           cost_fn, gain_fn, epsilon=None):
-    """Run single algorithm experiment with timeout support"""
+    """Run single algorithm experiment"""
     print(f"\nRunning {algorithm_name.upper()}" + (f" (ε={epsilon})" if epsilon else ""))
     print("-" * 50)
 
     try:
         if algorithm_name == "greedy":
             result = paper_greedy_search(
-                images, saliency_maps, args.N, args.m, budget, cost_fn, gain_fn,
-                timeout_seconds=args.greedy_timeout
+                images, saliency_maps, args.N, args.m, budget, cost_fn, gain_fn
             )
         elif algorithm_name == "ot":
             result = paper_ot_algorithm(
@@ -179,10 +170,6 @@ def run_single_experiment(algorithm_name, images, saliency_maps, args, budget,
             'm': args.m,
             'use_submodular': args.use_submodular
         })
-
-        # Add timeout info if available
-        if 'completion_reason' in result:
-            print(f"  Completion: {result['completion_reason']}")
 
         return result
 
