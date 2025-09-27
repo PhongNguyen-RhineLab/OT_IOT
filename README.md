@@ -309,9 +309,8 @@ python visualization.py results.csv operations.csv memory.csv
 
 ### 📄 **Publication Details**
 
-**Title:** "Online Approximate Algorithms for Object Detection under Budget Allocation"  
-**Conference:** SOICT 2025  
-**Status:** Submitted  
+**Title:** "Online Approximate Algorithms for Object Detection under Budget Allocation"
+**Status:** TBA
 
 ### 🎯 **Key Contributions**
 
@@ -412,10 +411,9 @@ MIT License - Feel free to use this code for research and commercial purposes
 
 <div align="center">
 
-**📧 Email:** [your.email@university.edu]  
-**🐙 GitHub:** [github.com/yourusername]  
-**📄 Paper:** [Link to paper when published]  
-**💼 LinkedIn:** [linkedin.com/in/yourprofile]
+**📧 Email:** [tuanphong.studybox@gmail.com]  
+**🐙 GitHub:** [https://github.com/PhongNguyen-RhineLab]  
+**📄 Paper:** [TBA]
 
 ---
 
